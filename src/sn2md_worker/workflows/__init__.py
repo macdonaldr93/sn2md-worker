@@ -8,9 +8,11 @@ correct order after `DBOS.launch()`.
 from __future__ import annotations
 
 from dbos import DBOS
+from dbos._error import DBOSException  # noqa: PLC2701
 
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.drive.client import DriveClient
+from sn2md_worker.logging import get_logger
 from sn2md_worker.workflows.backfill import backfill, backfill_impl
 from sn2md_worker.workflows.convert_note import convert_note, convert_note_impl
 from sn2md_worker.workflows.delete_output import delete_output, delete_output_impl
@@ -25,6 +27,9 @@ from sn2md_worker.workflows.renew_watch import (
     renew_watch_channel,
     renew_watch_channel_impl,
 )
+
+_log = get_logger("sn2md_worker.workflows")
+_SCHEDULE_EXISTS_MARKER = "already exists"
 
 POLL_QUEUE_NAME = "poll_queue"
 RENEW_SCHEDULE_NAME = "renew-watch-channel"
@@ -65,13 +70,24 @@ def register_queues() -> None:
 
 
 def register_schedules() -> None:
-    """Register DBOS schedules. Call after DBOS.launch()."""
-    DBOS.create_schedule(
-        schedule_name=RENEW_SCHEDULE_NAME,
-        workflow_fn=renew_watch_channel,
-        schedule=RENEW_SCHEDULE_CRON,
-        context="cron",
-    )
+    """Register DBOS schedules. Call after DBOS.launch().
+
+    Idempotent — DBOS persists schedule rows in `workflow_schedules`, so
+    a second boot raises `DBOSException("... already exists")`. Treat
+    that as a no-op. Changing the cron requires deleting the row (or
+    nuking the SQLite file).
+    """
+    try:
+        DBOS.create_schedule(
+            schedule_name=RENEW_SCHEDULE_NAME,
+            workflow_fn=renew_watch_channel,
+            schedule=RENEW_SCHEDULE_CRON,
+            context="cron",
+        )
+    except DBOSException as exc:
+        if _SCHEDULE_EXISTS_MARKER not in str(exc):
+            raise
+        _log.info("schedule_already_registered", schedule_name=RENEW_SCHEDULE_NAME)
 
 
 def seed_cursor_if_ready(drive: DriveClient | None) -> None:
