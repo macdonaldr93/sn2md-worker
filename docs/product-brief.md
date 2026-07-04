@@ -10,26 +10,30 @@ Runs continuously as a Docker container on my Unraid server.
 ## High-level flow
 
 1. Supernote syncs `.note` files into a source folder on Google Drive.
-2. Google Drive push-notification webhook hits the worker on Unraid.
-3. Worker debounces (polls file size + hash until stable) so partial syncs
-   aren't converted, then enqueues a DBOS workflow.
-4. Workflow runs sn2md against the file using Gemini 2.5 Pro, mirroring the
-   source folder layout into the destination.
-5. Destination is a local vault directory on Unraid; an Obsidian instance on
-   the same host has that directory open and pushes to Obsidian Sync.
+2. Google Drive push-notification webhook hits the worker on Unraid at
+   `POST /webhooks/drive`.
+3. Worker verifies the channel + token, then enqueues a `poll_changes`
+   DBOS workflow which walks the `changes.list` cursor and enqueues
+   `convert_note` for each affected `.note` file.
+4. `convert_note` downloads the file, runs sn2md against it using Gemini
+   2.5 Pro, and writes the Markdown + assets into a per-note
+   subdirectory that mirrors the Drive layout.
+5. Destination is a local vault directory on Unraid; an Obsidian instance
+   on the same host has that directory open and pushes to Obsidian Sync.
 
 ## Decisions
 
 ### Language & tooling
 
-- **Language**: Python 3.12+, wrapping `sn2md` directly (as a library or CLI
-  subprocess — TBD after reading sn2md's code).
+- **Language**: Python 3.11+ (sn2md's floor). Wraps `sn2md` as a library
+  via `sn2md.importer.import_supernote_file_core`.
 - **Packaging**: `uv` for venv, dependencies, lockfile, and runners.
 - **Lint/format**: `ruff`.
-- **Type checking**: `mypy` (or `pyright` — pick whichever fits DBOS's typing
-  story better).
-- **Pre-commit hooks**: run ruff + mypy on commit.
-- **CI**: GitHub Actions running lint + type check + tests on every push.
+- **Type checking**: `mypy`.
+- **Pre-commit hooks**: ruff (check + format) and mypy on every commit.
+- **CI**: GitHub Actions runs lint + type check + tests on push/PR;
+  a separate `release.yml` publishes multi-arch (`linux/amd64` +
+  `linux/arm64`) images to GHCR on push to main and semver tags.
 
 ### Drive integration
 
@@ -41,9 +45,13 @@ Runs continuously as a Docker container on my Unraid server.
   (webhooks) → worker's HTTPS endpoint on Unraid. Notifications only signal
   "something changed" — the worker then polls `changes.list` (with a saved
   `pageToken`) to get actual change details.
-- **Fallback poller**: an every-5-minutes scheduled `poll_changes` workflow
-  catches up whenever a webhook is missed (network glitch, container
-  restart, expired channel).
+- **Catch-up on restart**: `backfill` workflow enqueues on startup — it
+  walks the source folder tree and enqueues `convert_note` for anything
+  missing from `conversion_records` or whose md5 doesn't match.
+- **Fallback poller** (deferred): a scheduled `poll_changes` cron would
+  provide a safety net when a webhook is missed. Currently not built —
+  the startup backfill and manual webhook delivery both cover the
+  observed failure modes, and we can add it if we see actual misses.
 - **Public URL**: existing reverse proxy on Unraid handles TLS + routing to
   the worker container. Webhook path suggested: `/webhooks/drive`.
 - **Watch channel renewal**: Confirmed max TTL 7 days (604800s) for
@@ -54,9 +62,12 @@ Runs continuously as a Docker container on my Unraid server.
   random hex), echoed as `X-Goog-Channel-Token` on every notification.
   Worker verifies token + `X-Goog-Channel-Id` against the active channel
   record.
-- **Debounce**: after a change notification, poll `files.get` for the file's
-  `size` + `md5Checksum` every ~10s; only enqueue conversion once both have
-  been stable for ~30s. Reject conversion if file is still growing.
+- **Debounce** (deferred): the tech brief includes a per-file
+  size/md5 stability poll before conversion. Not built — Drive appears
+  to only publish notifications for completed uploads, so we've enqueued
+  `convert_note` directly. Table `debounce_state` exists and the runtime
+  is wired for it; we'll add the workflow if we observe bad conversions
+  from partial files in practice.
 - **Update handling**: overwrite the existing Markdown + assets **only if
   the source `.note` md5 has changed** since the last successful
   conversion. Identity for "same note" is the Drive path + filename, not
@@ -118,32 +129,47 @@ Runs continuously as a Docker container on my Unraid server.
 
 ### Deployment
 
-- **Runtime**: Docker container. I'll produce a Dockerfile +
-  `docker-compose.yml`; Ryan wires up the Unraid Community Apps template.
+- **Runtime**: Docker container, linuxserver.io-style — supports `PUID`,
+  `PGID`, `TZ`, `UMASK` env vars for correct host-side file ownership.
+  Multi-arch image (`linux/amd64` + `linux/arm64`) published to GHCR.
 - **Mounts**:
-  - `/data` (or similar) for DBOS SQLite + any state — persistent volume.
-  - `/vault` — bind-mount to the Obsidian vault path on Unraid.
-  - `/secrets/service-account.json` — bind-mount for the Google service
-    account key.
-- **Env vs config**: TOML/YAML config file for non-secret defaults;
-  environment variables override at runtime. Secrets always via env or
-  mounted files.
+  - `/data` — DBOS + application SQLite state, must be writable.
+  - `/vault` — bind-mount to the Obsidian vault path on the host, must
+    be writable.
+  - `/secrets/service-account.json` — Google service account JSON key
+    (mounted read-only).
+- **Env vs config**: TOML config file for non-secret defaults;
+  environment variables override at runtime. Container-canonical paths
+  (DB URL, vault root, credentials) are baked into the image so it
+  boots without any external config. Secrets always via env or mounted
+  files.
 
 ### Observability
 
-- **Health endpoints**: `/healthz` (liveness) and `/readyz` (readiness).
-- **Status endpoint**: `GET /status` returning JSON with recent conversions,
-  failures, queue depth, Drive watch channel state and expiry.
-- **Logs**: structured JSON to stdout; user reads via `docker logs`.
+- **Health endpoints**: `/healthz` (liveness) and `/readyz` (readiness —
+  200 iff an active Drive watch channel exists and hasn't expired, or
+  the worker is in dev mode with no webhook URL configured).
+- **Status endpoint**: `GET /status` returns JSON with recent
+  conversions, recent failures, active watch channel + expiry, and
+  Drive changes cursor. `queue_depth` and `backfill.state` fields are
+  spec'd but not yet populated.
+- **Logs**: structured JSON to stdout via `structlog`. Every workflow
+  emits `_started` / `_succeeded` / `_failed` / `_skipped (reason=…)`
+  events. Failures include a stringified exception plus the full
+  traceback under `exception`.
 - **Failure notifications**: none beyond logs (revisit if it becomes
   painful).
 
 ### Testing
 
-- **Unit tests**: for pure logic (path mapping, debounce state machine, hash
-  comparison, backfill diff logic).
-- **Integration tests**: with mocks for Drive API, Gemini, and DBOS.
-- **No live-API tests in CI** — verify manually against a test folder.
+- **Unit tests** (`tests/unit/`): 90 tests, in-memory SQLite. BDD
+  scenario classes for behavior (workflows, webhook, repos); plain
+  functions for pure logic (path helpers, model alias mapping,
+  TypeDecorator).
+- **Fake externals via MagicMock**: `DriveClient`, `sn2md.import_supernote_file_core`,
+  and `DBOS.enqueue_workflow` are patched at the call boundary.
+- **No live-API tests in CI** — verify manually against a scratch
+  Drive folder via `scripts/verify/`.
 
 ## Non-goals (for now)
 
@@ -172,19 +198,22 @@ Runs continuously as a Docker container on my Unraid server.
    the folder like any other collaborator. No Domain-Wide Delegation
    needed. **Load-bearing verification task** (moved to open items below).
 
-## Still open (verify at first milestone)
+## Verifications (resolved)
 
-- **Service-account changes feed on a personal user's shared folder**:
-  ✅ Verified 2026-07-04 via `scripts/verify/01_drive_access.py` —
-  personal-user edits on shared files DO appear in the service account's
-  `changes.list` feed. Bonus finding: Supernote's device-sync flow
-  replaces the Drive file (new `fileId`) rather than updating in place;
-  design implications captured in technical-brief §4a and reflected in
-  the workflow contracts.
-- **sn2md + Gemini end-to-end**: ✅ Verified 2026-07-04. Model string is
-  `gemini/gemini-2.5-pro` (prefixed form required by llm-gemini).
-  Baseline ~7.5s per page against Gemini 2.5 Pro.
-- **DBOS runtime shape in Docker**: DBOS docs don't spell out the
-  library-vs-daemon runtime boundary in the pages fetched. Assume
-  embedded library (single process for FastAPI + DBOS workflows); verify
-  at first milestone.
+- **Service-account changes feed on a personal user's shared folder** —
+  ✅ Verified 2026-07-04 via `scripts/verify/01_drive_access.py`.
+  Personal-user edits on shared files DO appear in the service
+  account's `changes.list` feed. Bonus finding: Supernote's device-sync
+  flow replaces the Drive file (new `fileId`) rather than updating in
+  place; design implications captured in technical-brief §4a and
+  reflected in the workflow contracts.
+- **sn2md + Gemini end-to-end** — ✅ Verified 2026-07-04. Model string
+  is `gemini/gemini-2.5-pro` (prefixed form required by llm-gemini).
+  Baseline ~7.5s per single-page mostly-drawing note against Gemini 2.5
+  Pro.
+- **DBOS runtime shape in Docker** — ✅ Runs as an embedded library
+  inside a single Python process; container smoke-tested end-to-end
+  (`docker compose up`, `/healthz` responds, workflows execute, SQLite
+  state persists).
+- **Multi-arch image publish** — pending first push to GitHub with the
+  release workflow in place.

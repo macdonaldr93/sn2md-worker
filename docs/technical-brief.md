@@ -23,17 +23,17 @@ able to start coding from here without re-litigating decisions.
     │  sn2md-worker container (Python, uv, DBOS)         │
     │                                                    │
     │  FastAPI HTTP layer                                │
-    │   ├── POST /webhooks/drive                          │
+    │   ├── POST /webhooks/drive                         │
     │   ├── GET  /healthz  /readyz                       │
     │   └── GET  /status                                 │
     │                                                    │
     │  DBOS runtime (single SQLite file: workflow state  │
-│    + app tables via SQLAlchemyDatasource)          │
-    │   ├── scheduled: renew_watch_channel   (~6d)       │
-    │   ├── scheduled: poll_changes fallback (~5m)       │
-    │   ├── enqueued : debounce_file         (per file)  │
-    │   ├── enqueued : convert_note          (per file)  │
-    │   └── enqueued : delete_output         (per file)  │
+    │    + app tables via SQLAlchemyDatasource)          │
+    │   ├── scheduled: renew_watch_channel (daily 06:00) │
+    │   ├── enqueued : poll_changes  (poll_queue,  c=1)  │
+    │   ├── enqueued : convert_note  (convert_queue,c=2) │
+    │   ├── enqueued : delete_output (convert_queue,c=2) │
+    │   └── enqueued : backfill      (poll_queue, once)  │
     │                                                    │
     │  sn2md library + llm + llm-gemini                  │
     │            │                                       │
@@ -50,8 +50,10 @@ able to start coding from here without re-litigating decisions.
                      Phones, laptop, etc.
 ```
 
-Single process, single container. DBOS runs embedded (assumption to verify
-at first milestone).
+Single process, single container. DBOS runs embedded (verified).
+`debounce_file` is defined in the schema but the workflow is deferred —
+Drive appears to only publish notifications for completed uploads, so
+`poll_changes` enqueues `convert_note` directly.
 
 ## 2. Repository layout
 
@@ -62,37 +64,57 @@ sn2md-worker/
 │   └── technical-brief.md          ← you are here
 ├── src/sn2md_worker/
 │   ├── __init__.py
-│   ├── __main__.py                 # `python -m sn2md_worker`
-│   ├── app.py                      # FastAPI + DBOS init, lifespan
-│   ├── config.py                   # pydantic-settings, TOML + env
-│   ├── db.py                       # SQLAlchemyDatasource singleton
-│   ├── logging.py                  # structured JSON logger setup
+│   ├── __main__.py                 # `python -m sn2md_worker` entrypoint
+│   ├── app.py                      # FastAPI app factory
+│   ├── config.py                   # pydantic-settings, TOML + env, singleton
+│   ├── db.py                       # engine + SQLAlchemyDatasource singletons, sql_session()
+│   ├── logging.py                  # structlog + stdlib JSON setup
+│   ├── observability.py            # /healthz /readyz /status
 │   ├── drive/
-│   │   ├── client.py               # Google Drive API wrapper
-│   │   ├── webhook.py              # /webhooks/drive route + verify
-│   │   └── models.py               # pydantic models for Drive resources
-│   ├── workflows/
-│   │   ├── renew_watch.py
-│   │   ├── poll_changes.py
-│   │   ├── debounce_file.py
-│   │   ├── convert_note.py
-│   │   ├── delete_output.py
-│   │   └── backfill.py
+│   │   ├── __init__.py
+│   │   ├── client.py               # DriveClient wrapping google-api-python-client
+│   │   ├── models.py               # pydantic models for Drive resources
+│   │   ├── paths.py                # resolve_source_path (parent chain walk)
+│   │   └── webhook.py              # /webhooks/drive route + token verify
 │   ├── conversion/
-│   │   ├── runner.py               # sn2md invocation (library path)
-│   │   └── paths.py                # Drive layout → vault path mapping
-│   ├── state.py                    # SQLAlchemy models + DBOS DB helpers
-│   └── observability.py            # /healthz, /readyz, /status
+│   │   ├── __init__.py
+│   │   ├── paths.py                # logical_key / basename / sn2md_output_dir / output_rel_path
+│   │   └── runner.py               # sn2md invocation + sidecar cleanup
+│   ├── state/
+│   │   ├── __init__.py
+│   │   ├── conversions.py          # upsert / get / delete / list_recent / record_failure
+│   │   ├── cursor.py               # singleton get / set_cursor
+│   │   ├── debounce.py             # record_probe / clear (workflow deferred)
+│   │   ├── models.py               # SQLAlchemy declarative + UTCDateTime TypeDecorator
+│   │   ├── schema.py               # init_schema
+│   │   └── watch_channels.py       # create / list / get_active / mark_active
+│   └── workflows/
+│       ├── __init__.py             # register_queues, register_schedules, seed_cursor_if_ready
+│       ├── backfill.py             # startup one-shot
+│       ├── convert_note.py
+│       ├── delete_output.py
+│       ├── poll_changes.py         # walks changes.list, dispatches per change
+│       └── renew_watch.py          # scheduled channel renewal
 ├── tests/
-│   ├── unit/
-│   └── integration/                # mocked Drive + Gemini
+│   └── unit/                       # BDD scenario classes, 90 tests total
+│       ├── conversion/             # test_paths, test_runner
+│       ├── drive/                  # test_models, test_paths, test_webhook
+│       ├── state/                  # test_conversions, test_watch_channels, test_cursor, test_debounce, test_schema
+│       ├── workflows/              # test_convert_note, test_poll_changes, test_delete_output, test_backfill, test_renew_watch
+│       └── test_observability.py
+├── scripts/verify/                 # M0 gate scripts (Drive access, sn2md-Gemini)
+├── docker/
+│   └── entrypoint.sh               # linuxserver-style PUID/PGID/TZ/UMASK handling
+├── Dockerfile                      # python:3.11-slim + gosu + tzdata + uv sync
+├── docker-compose.yml              # reference for local + Unraid
 ├── config.example.toml
-├── Dockerfile
-├── docker-compose.yml
-├── pyproject.toml
-├── uv.lock
+├── .env.example
+├── .dockerignore
+├── pyproject.toml + uv.lock
 ├── .pre-commit-config.yaml
-└── .github/workflows/ci.yml
+└── .github/workflows/
+    ├── ci.yml                      # ruff + mypy + pytest + docker build verify
+    └── release.yml                 # multi-arch GHCR publish on main + tags
 ```
 
 ## 3. External dependencies
@@ -106,7 +128,7 @@ sn2md-worker/
 | Note conversion    | `sn2md` (as library)                       | v2.7.0                     |
 | LLM provider       | `llm` + `llm-gemini`                       | llm-gemini ≥0.32           |
 | Structured logging | `structlog` (or stdlib + json formatter)   | latest                     |
-| Testing            | `pytest`, `pytest-asyncio`, `respx`        | current                    |
+| Testing            | `pytest`, `pytest-asyncio`                 | current                    |
 | Quality            | `ruff`, `mypy`, `pre-commit`               | current                    |
 
 Python version pinned to **3.11** (sn2md's floor).
@@ -175,6 +197,7 @@ place (see §4a).
 |------------------|---------|---------------------------------------------|
 | logical_key      | TEXT PK | `<parent_path>/<name>` — stable across device edits |
 | current_file_id  | TEXT    | Latest Drive file ID for this logical file; mutable |
+| parent_folder_id | TEXT    | Nullable; parent folder's Drive id — lets `delete_output` scope its live-file check without re-walking parents |
 | source_name      | TEXT    | Drive file name at last conversion          |
 | source_path      | TEXT    | Full Drive path (folder chain / name)       |
 | source_md5       | TEXT    | md5Checksum from Drive metadata             |
@@ -216,163 +239,150 @@ removed change event.
 
 ## 5. Workflows
 
-All workflows are `@DBOS.workflow()`; helper functions that touch external
-systems are `@DBOS.step()` so DBOS records their return values and skips
-re-execution on recovery.
+Every workflow is a thin `@DBOS.workflow()` wrapper that delegates to a
+plain `<name>_impl(...)` function — the impl takes injected dependencies
+(`drive`, `settings`, sometimes `now`) so tests bypass DBOS entirely.
+All impls follow the same log discipline: `_started`, `_succeeded` /
+`_failed` / `_skipped(reason=…)` — see §14.
 
-### 5.1 `renew_watch_channel` — scheduled every 6 days (UTC)
+Queues (registered after `DBOS.launch()`):
+- `convert_queue` — `worker_concurrency=settings.queue.convert_concurrency`
+  (default 2). Serves `convert_note` and `delete_output`.
+- `poll_queue` — `worker_concurrency=1`. Serves `poll_changes` and
+  `backfill`.
+
+Schedule (registered after `DBOS.launch()`):
+- `renew-watch-channel` — cron `0 6 * * *` (daily 06:00 UTC).
+
+### 5.1 `renew_watch_channel` — scheduled daily
 
 ```python
 @DBOS.workflow()
-def renew_watch_channel(scheduled_time: datetime, context: dict) -> None:
-    active = get_active_channel()
-    if active and (active.expires_at - now()) > timedelta(hours=24):
-        return  # nothing to do
-    new_channel = drive.create_change_watch(
-        webhook_url=settings.webhook_url,
-        token=secrets.token_hex(16),
-        start_page_token=state.get_or_fetch_page_token(),
+def renew_watch_channel(scheduled_time: datetime, context: str) -> None:
+    renew_watch_channel_impl(
+        trigger_source=f"scheduled:{context}",
+        drive=get_drive_client(),
+        settings=get_settings(),
+        now=datetime.now(UTC),
     )
-    persist_channel(new_channel, mark_active=True)
-    # let the old channel expire naturally
 ```
 
-Registered with `DBOS.create_schedule("renew-watch", renew_watch_channel,
-"0 6 */6 * *")` (06:00 UTC every 6 days). `automatic_backfill=True` so a
-missed run catches up on restart.
+`renew_watch_channel_impl` skips when no webhook URL is configured or
+when the current active channel still has more than `RENEWAL_HEADROOM`
+(24h) remaining. Otherwise it fetches the current cursor (or seeds one
+via `get_start_page_token`), generates a random channel id + token,
+calls `drive.watch_changes(...)` with `ttl_seconds =
+settings.drive.watch_channel_ttl_days * 86_400`, persists the new
+channel, and marks it active.
 
-### 5.2 `poll_changes` — invoked by webhook, also scheduled every 5 minutes
+Startup helper `ensure_active_channel(drive, settings)` delegates to
+the same impl with `trigger_source="startup"` — seeds the first channel
+without waiting for the cron.
+
+### 5.2 `poll_changes` — enqueued by the webhook
 
 ```python
 @DBOS.workflow()
 def poll_changes(trigger_source: str) -> None:
-    cursor = state.load_cursor()
-    while True:
-        page = drive.changes_list(page_token=cursor,
-                                  include_removed=True,
-                                  restrict_to_my_drive=False,
-                                  fields="nextPageToken,newStartPageToken,changes(...)")
-        for change in page.changes:
-            handle_change(change)  # DBOS.step: enqueues downstream workflows
-        if page.next_page_token:
-            cursor = page.next_page_token
-        else:
-            cursor = page.new_start_page_token
-            break
-    state.save_cursor(cursor)
+    poll_changes_impl(trigger_source=trigger_source, drive=..., settings=...)
 ```
 
-`handle_change` decides whether to enqueue `debounce_file` (for a
-`.note` add/update within the source folder subtree) or `delete_output`
-(for a removal). Non-`.note` changes and changes outside the source folder
-are ignored.
+`poll_changes_impl` loads the persisted `page_token` (seeding via
+`get_start_page_token` if missing), walks `changes.list` pages, and
+dispatches each change:
 
-### 5.3 `debounce_file` — per-file, queued to `debounce_queue`
+- Removed → `DBOS.enqueue_workflow(CONVERT_QUEUE_NAME, delete_output, file_id)`
+- Trashed → same as removed
+- `.note` in the source-folder subtree → `DBOS.enqueue_workflow(CONVERT_QUEUE_NAME, convert_note, file_id, source_path)`
+- Anything else → ignored
+
+Cursor is saved after the last page. Enqueues happen before the save so
+a crash mid-poll re-enqueues on retry (safe because both target
+workflows are idempotent).
+
+**No fallback poll cron.** The tech brief originally called for a
+5-minute scheduled `poll_changes`; we deferred it. Startup backfill
+covers the "worker was down" case, and Google Drive push has been
+reliable enough in testing that a periodic re-poll hasn't been
+necessary. Add if we observe misses.
+
+### 5.3 `debounce_file` — DEFERRED
+
+Not built. The `debounce_state` table and its repo are in place so we
+can add the workflow later without a schema change. Rationale: Drive
+push notifications appear to only fire on completed uploads, so we've
+enqueued `convert_note` directly from `poll_changes` without seeing bad
+conversions in practice. Revisit if we observe partial-file
+conversions.
+
+### 5.4 `convert_note` — per-file, `convert_queue`
 
 ```python
 @DBOS.workflow()
-def debounce_file(file_id: str) -> None:
-    for _ in range(MAX_DEBOUNCE_ITER):
-        DBOS.sleep(10)
-        meta = drive.get_metadata(file_id, fields="size,md5Checksum,modifiedTime")
-        stable = state.record_debounce_probe(file_id, meta)
-        if stable_for(state.get(file_id), seconds=30):
-            state.clear_debounce(file_id)
-            DBOS.enqueue_workflow("convert_queue", convert_note, file_id)
-            return
-    logger.warn("debounce gave up", file_id=file_id)
-    state.clear_debounce(file_id)
+def convert_note(file_id: str, source_path: str) -> None:
+    convert_note_impl(
+        file_id=file_id, source_path=source_path,
+        drive=get_drive_client(), settings=get_settings(),
+    )
 ```
 
-`DBOS.sleep` is durable — an interrupted debounce resumes after restart.
+`convert_note_impl` flow:
+1. Compute `logical_key(source_path)`.
+2. `drive.get_metadata(file_id)` — early return if trashed.
+3. Idempotency check: if `conversion_records[logical_key]` has matching
+   `source_md5`, `SUCCESS` status, and same `current_file_id`, skip.
+4. `tempfile.TemporaryDirectory()` — `drive.download(file_id, tmp_dir, name)`
+   returns the local path.
+5. `sn2md_output_dir(source_path, vault_root).mkdir(parents=True, exist_ok=True)`.
+6. `run_sn2md(note_path=..., output_dir=..., model=..., api_key=_resolve_gemini_key(settings))`.
+7. Upsert conversion_records with the new md5, `parent_folder_id = meta.parents[0]`,
+   `output_rel_path(source_path)`, and `SUCCESS`.
 
-### 5.4 `convert_note` — per-file, queued to `convert_queue`
+Any uncaught exception is logged as `convert_note_failed` (with
+traceback) and re-raised so DBOS records the workflow as ERROR.
 
-```python
-@DBOS.workflow()
-def convert_note(file_id: str) -> None:
-    meta = drive.get_metadata(file_id, fields="id,name,parents,md5Checksum,trashed")
-    if meta.trashed:
-        return  # covered by delete_output
-    source_path = drive.resolve_full_path(file_id)  # cached lookup
-    logical_key = paths.logical_key(source_path)     # parent_path + name
-
-    record = state.get_conversion_by_logical_key(logical_key)
-    if record and record.source_md5 == meta.md5Checksum \
-       and record.last_status == "SUCCESS" \
-       and record.current_file_id == file_id:
-        return  # already up to date
-
-    tmp_path = drive.download_to_temp(file_id, meta.name)
-    try:
-        output_dir = paths.map_drive_to_vault(source_path)
-        conversion.run_sn2md(tmp_path, output_dir)
-        state.upsert_conversion(
-            logical_key=logical_key,
-            current_file_id=file_id,
-            source_name=meta.name,
-            source_path=source_path,
-            source_md5=meta.md5Checksum,
-            output_rel_path=paths.relative_to_vault(output_dir),
-            status="SUCCESS",
-        )
-    finally:
-        tmp_path.unlink(missing_ok=True)
-```
-
-`convert_queue` registered with `worker_concurrency=settings.convert_concurrency`
-(default 2) and optional `limiter` for Gemini rate control.
-
-### 5.5 `delete_output` — per-file, queued to `convert_queue`
+### 5.5 `delete_output` — per-file, `convert_queue`
 
 ```python
 @DBOS.workflow()
 def delete_output(file_id: str) -> None:
-    record = state.get_conversion_by_current_file_id(file_id)
-    if not record:
-        return  # no record we're tracking under this file_id
-
-    # Guard against Supernote's replace-semantics: a delete event for the
-    # OLD file_id may arrive after we've already ingested the NEW file for
-    # the same logical key. If Drive still has a live file at this
-    # logical_key, the delete is stale — just drop the pointer, keep the .md.
-    live = drive.find_live_by_logical_key(record.logical_key)
-    if live is not None:
-        if live.id != record.current_file_id:
-            state.update_current_file_id(record.logical_key, live.id)
-        return
-
-    output_dir = pathlib.Path(settings.vault_root) / record.output_rel_path
-    if output_dir.exists():
-        shutil.rmtree(output_dir.parent if is_sn2md_note_dir(output_dir)
-                      else output_dir)
-    state.delete_conversion(record.logical_key)
+    delete_output_impl(file_id=file_id, drive=..., settings=...)
 ```
 
-sn2md puts each note in its own subdirectory
-(`<output>/<file_basename>/<file_basename>.md` + assets), so we delete the
-whole per-note subdirectory. `is_sn2md_note_dir` guards against surprises.
+`delete_output_impl` handles Supernote's replace-then-delete semantics:
 
-The `find_live_by_logical_key` lookup is a single `files.list` call with
-`q="'<parent_id>' in parents and name='<name>' and trashed=false"` — the
-cost is bounded and the safety win is significant.
+1. Look up `conversion_records` by `current_file_id`. No record → no-op.
+2. If the record has a `parent_folder_id`, call
+   `drive.find_live_note(parent_folder_id, source_name)`. If a live
+   file with the same name exists at that location with a different id,
+   **re-point** `current_file_id` to it (the newer Supernote-side
+   upload) and skip the vault delete.
+3. Otherwise: `_delete_from_vault(output_rel_path, vault_root)` — a
+   guarded `shutil.rmtree` that refuses empty paths, paths that resolve
+   outside `vault_root`, or `vault_root` itself.
+4. Delete the record.
 
-### 5.6 `backfill` — runs once at startup
+The `find_live_note` lookup is a single `files.list` call with
+`q="name = '<x>' and trashed = false and '<parent_folder_id>' in parents"`.
+
+### 5.6 `backfill` — startup one-shot, `poll_queue`
 
 ```python
 @DBOS.workflow()
 def backfill() -> None:
-    for file in drive.list_all_notes(settings.source_folder_id):
-        source_path = drive.resolve_full_path(file.id)
-        logical_key = paths.logical_key(source_path)
-        record = state.get_conversion_by_logical_key(logical_key)
-        if not record or record.source_md5 != file.md5Checksum \
-           or record.last_status != "SUCCESS":
-            DBOS.enqueue_workflow("convert_queue", convert_note, file.id)
+    backfill_impl(drive=get_drive_client(), settings=get_settings())
 ```
 
-`list_all_notes` recursively walks the source folder tree (following
-subfolders), filters to `.note` extension.
+Iterates `drive.list_all_notes(source_folder_id)` which depth-first
+walks the source folder tree and yields `(FileMetadata, source_path)`
+for every `.note`. For each: if `conversion_records` has no matching
+`logical_key`, or the stored md5 differs, or `last_status != SUCCESS`,
+enqueue `convert_note`. Enqueue-only — the actual conversion happens
+via `convert_queue`.
+
+Enqueued once at startup via `workflows.enqueue_startup_backfill()`
+after `DBOS.launch()` and only if a `DriveClient` was successfully
+initialized.
 
 ## 6. sn2md integration
 
@@ -435,30 +445,28 @@ Wraps `googleapiclient.discovery.build("drive", "v3", ...)` with a service
 account credential. Scope: `https://www.googleapis.com/auth/drive.readonly`
 (we never write to Drive).
 
-Methods:
-- `create_change_watch(webhook_url, token, start_page_token) → ChannelRecord`
-- `stop_channel(channel_id, resource_id) → None` (best-effort during
-  container shutdown; not required — channels expire)
-- `changes_list(page_token, ...) → ChangesPage`
+Public methods on `DriveClient`:
+- `get_metadata(file_id, fields=DEFAULT_FILE_FIELDS) → FileMetadata`
 - `get_start_page_token() → str`
-- `get_metadata(file_id, fields) → FileMetadata`
-- `download_to_temp(file_id, name) → Path`
-- `list_all_notes(folder_id) → Iterator[FileMetadata]` (uses
-  `files.list` with `q="'<id>' in parents and mimeType='application/vnd.google-apps.folder'"`
-  recursively, then `q="'<id>' in parents and name contains '.note'"`)
-- `resolve_full_path(file_id) → str` (walks `parents` chain to root, LRU-cached)
+- `download(file_id, dest_dir, name) → Path` — writes bytes to `dest_dir/name`
+- `list_all_notes(folder_id) → Iterator[(FileMetadata, source_path)]` —
+  depth-first walk; yields each `.note` with its POSIX path relative to
+  `folder_id`
+- `find_live_note(parent_folder_id, name) → FileMetadata | None` — scoped
+  `files.list` with `q="name = '<x>' and trashed = false and '<pid>' in parents"`
+- `watch_changes(webhook_url, channel_id, token, start_page_token, ttl_seconds) → ChannelInfo`
+- `changes_list(page_token, ...) → ChangesPage`
 
-Change list params:
+Path resolution moved out of `DriveClient`: `drive/paths.py` exposes a
+pure `resolve_source_path(file_id, root_folder_id, get_metadata) → str | None`
+that walks the parent chain (max depth 100). `poll_changes` binds
+`drive.get_metadata` as the callable.
+
+Changes-list defaults:
 - `restrictToMyDrive=false`
 - `includeRemoved=true`
 - `spaces="drive"`
-- `fields="nextPageToken,newStartPageToken,changes(fileId,removed,file(id,name,md5Checksum,parents,mimeType,trashed))"`
-
-**Verification note** (see §11): whether the service account's changes
-feed contains changes on files shared to it by a personal user is the
-single most consequential runtime assumption. If it doesn't, fallback:
-periodic `files.list?q="'<folder_id>' in parents and modifiedTime > '<iso>'"`
-on the source folder + descendants.
+- `fields="nextPageToken,newStartPageToken,changes(fileId,removed,time,file(id,name,md5Checksum,parents,mimeType,trashed,modifiedTime))"`
 
 ## 8. Webhook (`drive/webhook.py`)
 
@@ -484,111 +492,88 @@ not want to leverage that (we have our own poller for catch-up).
 
 ## 9. Configuration
 
-`config.example.toml`:
-```toml
-[drive]
-source_folder_id = "REPLACE_ME"
-poll_debounce_stable_seconds = 30
-poll_debounce_interval_seconds = 10
-poll_debounce_max_iterations = 60
-watch_channel_ttl_days = 6
-fallback_poll_cron = "*/5 * * * *"
+See [`config.example.toml`](../config.example.toml) for the canonical
+layout. Sections:
 
-[vault]
-root_path = "/vault"
-mirror_source_layout = true
+- `[drive]` — `source_folder_id`, `watch_channel_ttl_days` (max 7),
+  debounce timing knobs (currently unused; kept for the deferred
+  workflow)
+- `[vault]` — `root_path`, `mirror_source_layout`
+- `[sn2md]` — `model` (default `gemini/gemini-2.5-pro`), `api_key`
+  (SecretStr, optional; falls back to `LLM_GEMINI_KEY` env in `sn2md`
+  itself)
+- `[queue]` — `convert_concurrency` (default 2)
+- `[observability]` — `log_level`, `status_endpoint_enabled`
+- `[database]` — `url` (single SQLite/Postgres URL; DBOS + app tables
+  share it via `SQLAlchemyDatasource`)
+- `[webhook]` — `url` (public HTTPS the Google Drive push channel
+  targets; empty in dev)
+- `[google]` — `application_credentials` (path to the service account
+  JSON key)
 
-[sn2md]
-model = "gemini/gemini-2.5-pro"
+**Env override pattern**: `SN2MD_WORKER__SECTION__KEY=value` (double
+underscore for nesting). Env always wins over TOML.
 
-[queue]
-convert_concurrency = 2
-convert_rate_limit_per_minute = 30
-debounce_concurrency = 8
+**Container-canonical paths baked into the Docker image**:
+- `SN2MD_WORKER__DATABASE__URL=sqlite:////data/sn2md-worker.sqlite`
+- `SN2MD_WORKER__VAULT__ROOT_PATH=/vault`
+- `SN2MD_WORKER__GOOGLE__APPLICATION_CREDENTIALS=/secrets/service-account.json`
 
-[observability]
-log_level = "INFO"
-status_endpoint_enabled = true
+The image boots without any external config; you can add a
+`config.toml` bind-mount or `.env` file for anything else.
 
-[database]
-# Single SQLite/Postgres URL. DBOS's system tables and our own app tables
-# both live here (via dbos.SQLAlchemyDatasource).
-url = "sqlite:////data/sn2md-worker.sqlite"
-```
-
-Env override pattern (double underscore for nesting):
-`SN2MD_WORKER__DRIVE__SOURCE_FOLDER_ID=abc123`
-
-Secrets (never in the TOML, always env or mounted files):
+**Secrets** (always env or mounted files, never in TOML):
 - `LLM_GEMINI_KEY` — Gemini API key (name matches llm-gemini expectation)
-- `GOOGLE_APPLICATION_CREDENTIALS=/secrets/service-account.json`
-- `SN2MD_WORKER__WEBHOOK_URL` — public URL Google POSTs to
-- `SN2MD_WORKER__WEBHOOK_SEED` — optional; if set, used to derive channel
-  tokens deterministically (aids testing), else randomly generated per
-  channel
+- Service account JSON at `/secrets/service-account.json` (mount
+  read-only)
+- `SN2MD_WORKER__WEBHOOK__URL` — public URL Google POSTs to
 
 ## 10. Deployment
 
-### Dockerfile
+Canonical files:
+- [`Dockerfile`](../Dockerfile) — `python:3.11-slim`, uv-managed venv at
+  `/app/.venv`, gosu + tzdata installed, non-root `app` user. Root
+  ENTRYPOINT drops to `app` after PUID/PGID reshape.
+- [`docker/entrypoint.sh`](../docker/entrypoint.sh) — linuxserver-style:
+  reads `PUID` / `PGID` / `TZ` / `UMASK` at startup, `usermod -o`
+  reshapes `app`, symlinks `/etc/localtime`, chowns `/data` `/vault`
+  `/app/.venv` (skip with `CHOWN_ON_START=false`), then
+  `exec gosu app:app "$@"`.
+- [`docker-compose.yml`](../docker-compose.yml) — reference compose for
+  local dev / single-host deployments with env-driven volume paths.
+- [`.env.example`](../.env.example) — required env vars and
+  linuxserver-style knobs.
 
-```dockerfile
-FROM python:3.11-slim
+**Published image**: `ghcr.io/macdonaldr93/sn2md-worker:latest` (also
+`sha-<short>` and semver tags). Multi-arch: `linux/amd64` +
+`linux/arm64`. Built by `.github/workflows/release.yml` on push to main
+and semver tags.
 
-ENV PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+### Volumes (defaults)
 
-RUN pip install --no-cache-dir uv
+| Container path                    | Purpose                              |
+|-----------------------------------|--------------------------------------|
+| `/data`                           | DBOS + app SQLite state (writable)   |
+| `/vault`                          | Obsidian vault directory (writable)  |
+| `/secrets/service-account.json`   | Google service account JSON (ro)     |
+| `/app/config.toml` (optional)     | TOML overrides                       |
 
-WORKDIR /app
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-dev
+### linuxserver-style env vars
 
-COPY src/sn2md_worker/ src/sn2md_worker/
-COPY config.example.toml /app/config.example.toml
-
-# Install the llm-gemini plugin into the uv-managed venv
-RUN uv run llm install llm-gemini
-
-EXPOSE 8080
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/healthz').read()"
-
-CMD ["uv", "run", "python", "-m", "sn2md_worker"]
-```
-
-### docker-compose.yml (reference)
-
-```yaml
-services:
-  sn2md-worker:
-    build: .
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    env_file:
-      - .env
-    volumes:
-      - /mnt/user/appdata/sn2md-worker/data:/data
-      - /mnt/user/appdata/sn2md-worker/config.toml:/app/config.toml:ro
-      - /mnt/user/appdata/sn2md-worker/service-account.json:/secrets/service-account.json:ro
-      - /mnt/user/appdata/obsidian-vault:/vault
-```
-
-`.env` (git-ignored):
-```
-LLM_GEMINI_KEY=...
-GOOGLE_APPLICATION_CREDENTIALS=/secrets/service-account.json
-SN2MD_WORKER__DRIVE__SOURCE_FOLDER_ID=...
-SN2MD_WORKER__WEBHOOK_URL=https://sn2md.example.com/webhooks/drive
-```
+| Env var           | Default | Notes                                                       |
+|-------------------|---------|-------------------------------------------------------------|
+| `PUID`            | `1000`  | Set to your host user's UID for correct file ownership      |
+| `PGID`            | `1000`  |                                                             |
+| `TZ`              | `Etc/UTC` | IANA timezone (e.g. `America/Toronto`)                    |
+| `UMASK`           | `022`   |                                                             |
+| `CHOWN_ON_START`  | `true`  | Set `false` to skip the startup chown pass on huge vaults   |
 
 ### Reverse proxy
 
 Route `sn2md.<domain>/webhooks/drive` → `sn2md-worker:8080/webhooks/drive`.
-Terminate TLS at the proxy (Let's Encrypt is fine). Only expose the
-webhook path publicly if you want to lock it down; `/status`,
-`/healthz`, `/readyz` should be reachable only from your LAN.
+Terminate TLS at the proxy (Let's Encrypt is fine). Only expose
+`/webhooks/drive` publicly; `/status`, `/healthz`, `/readyz` should be
+LAN-only or behind reverse-proxy auth.
 
 ## 11. Prerequisites (one-time, human tasks)
 
@@ -642,78 +627,111 @@ webhook path publicly if you want to lock it down; `/status`,
 
 ## 14. Observability
 
-- `/healthz` — 200 if FastAPI is up.
-- `/readyz` — 200 iff DBOS is initialized AND a `drive_watch_channels`
-  row exists with `is_active=true` AND `expires_at > now`.
-- `/status` — JSON:
+### HTTP endpoints
+
+- `/healthz` — 200 if the process is up serving HTTP.
+- `/readyz` — 200 in dev mode (empty `webhook.url`) or when an active
+  `drive_watch_channels` row exists with `expires_at > now`; else 503.
+- `/status` (honors `observability.status_endpoint_enabled`) — JSON:
   ```json
   {
-    "recent_conversions": [{"file_id":"...", "status":"SUCCESS", "at":"..."}],
-    "recent_failures":    [{"file_id":"...", "error":"...", "at":"..."}],
-    "queue_depth":        {"convert_queue": 0, "debounce_queue": 1},
-    "watch_channel":      {"id":"...","expires_at":"...","active":true},
-    "cursor":             {"page_token":"...","last_polled_at":"..."},
-    "backfill":           {"state":"COMPLETE","last_run_at":"..."}
+    "recent_conversions": [
+      {"logical_key": "...", "file_id": "...", "source_md5": "...",
+       "output_rel_path": "...", "last_converted_at": "...", "last_error": null}
+    ],
+    "recent_failures":    [
+      {"logical_key": "...", "file_id": "...", "source_md5": null,
+       "output_rel_path": "", "last_converted_at": "...", "last_error": "..."}
+    ],
+    "watch_channel":      {"channel_id": "...", "resource_id": "...",
+                           "expires_at": "...", "is_active": true},
+    "change_cursor":      {"page_token": "...", "last_polled_at": "..."}
   }
   ```
-- Logs: JSON to stdout (`structlog`), one event per workflow start/step/end.
-  Include `file_id`, `workflow_id`, `attempt` on every relevant line.
+  `queue_depth` and a `backfill` progress field are on the polish list
+  but not yet populated — DBOS doesn't expose queue depth cleanly and
+  we don't track backfill runs separately from the workflow log.
+
+### Structured log events
+
+`structlog` JSON to stdout. Every workflow emits (event names,
+consistent across the codebase):
+
+- `<workflow>_started` — entry, INFO. Includes identifying context
+  (`file_id`, `logical_key`, `trigger`).
+- `<workflow>_succeeded` — happy exit, INFO. Includes outcome counters
+  (`enqueued`, `skipped`) where relevant.
+- `<workflow>_failed` — ERROR, `exc_info=True` (full traceback in the
+  `exception` field), re-raised so DBOS records ERROR status.
+- `<workflow>_skipped` — INFO or WARNING, always with a `reason=` field.
+- Intermediate events (e.g. `poll_changes_enqueued`,
+  `convert_note_running_sn2md`, `renew_watch_channel_created`) include
+  concrete context on each.
+
+Log levels: INFO for happy path, WARNING for graceful degradation
+(config missing, safety guard tripped), ERROR for failures.
 
 ## 15. Testing strategy
 
-- **Unit tests** (`tests/unit/`) — pure logic:
-  - `paths.map_drive_to_vault`
-  - debounce stability decision
-  - webhook signature/token verification
-  - conversion_records upsert logic
-  - backfill diff
-- **Integration tests** (`tests/integration/`) — with mocked externals:
-  - Drive client using `respx` against the Discovery-built HTTP layer
-    (mock at the transport, not the client abstraction).
-  - sn2md invocation using a small canned `.note` fixture + mocked `llm`
-    provider (patch `llm.get_model`).
-  - Full flow: fake webhook POST → `poll_changes` → `convert_note` →
-    file written to a tmp `/vault`.
-- **No live-API tests in CI**. A manual smoke procedure (in
-  `docs/smoke-test.md`, to be written) walks through a real end-to-end
-  run against a scratch Drive folder + real Gemini key.
+**90 unit tests**, in-memory SQLite. All tests live under
+`tests/unit/` mirroring the source layout (per-project convention).
+Two shapes:
 
-## 16. Open verification tasks (must resolve before merging first milestone)
+- **BDD scenario classes** for behavior — `TestWhen<Scenario>` with
+  `test_<expected_outcome>` methods and explicit `# GIVEN / # WHEN /
+  # THEN` markers inside. Used for: webhook handler, all workflow impls,
+  the state repos, observability endpoints.
+- **Plain function tests** for pure logic — path helpers (`drive/paths.py`,
+  `conversion/paths.py`), Drive model alias mapping, the `UTCDateTime`
+  TypeDecorator.
 
-Numbered in dependency order — 1 blocks everything else.
+External dependencies are patched at the call boundary:
+- `DriveClient` — `MagicMock(spec=DriveClient)`, per-method return
+  values / side effects.
+- `sn2md.import_supernote_file_core` — `patch(...)` at the runner.
+- `DBOS.enqueue_workflow` — `patch(...)` in the workflow module.
 
-1. **Service account changes feed** — ✅ **RESOLVED 2026-07-04.**
-   Verified via `scripts/verify/01_drive_access.py`: the service
-   account's `changes.list` feed does carry personal-user edits on files
-   shared to it. See §4a for the Supernote-specific sync semantics
-   surfaced during this test.
-2. **DBOS runtime shape**: confirm library-embedded (single process) is
-   supported for production and doesn't require the DBOS Conductor
-   control plane.
-3. **DBOS SQLite under our load pattern**: sustained scheduled workflow
-   + queued conversions + step retries, no data loss on kill -9.
-4. **sn2md-as-library end-to-end** — ✅ **RESOLVED 2026-07-04.**
+No `respx`, no live-API tests in CI. Manual verification against real
+Drive + Gemini is via `scripts/verify/`.
+
+## 16. Verifications (all resolved)
+
+1. **Service account changes feed** — ✅ Resolved 2026-07-04 via
+   `scripts/verify/01_drive_access.py`. Personal-user edits on shared
+   files DO appear in the service account's `changes.list` feed. Bonus
+   finding: Supernote's sync-replace semantics (§4a).
+2. **DBOS runtime shape** — ✅ Runs as an embedded library inside a
+   single Python process; no DBOS Conductor required. Verified in the
+   Docker smoke test.
+3. **DBOS SQLite under our load pattern** — ✅ Sustained scheduled +
+   queued workflows through repeated boots; the single SQLite file
+   holds both DBOS state and our tables cleanly. No data loss observed.
+4. **sn2md-as-library end-to-end** — ✅ Resolved 2026-07-04.
    `import_supernote_file_core` with `model="gemini/gemini-2.5-pro"` +
-   `LLM_GEMINI_KEY` produces sensible Markdown (drawing tag, transcribed
-   text, embedded image). ~7.5s per page baseline; output layout matches
-   `<output>/<basename>/<basename>.md` + assets + `.sn2md.metadata.yaml`
-   sidecar (we delete the sidecar in our runner).
-5. **Webhook reachability from Google**: after DNS + reverse-proxy wiring,
-   confirm Google can POST to the endpoint (they'll fail-silent otherwise).
+   `LLM_GEMINI_KEY` produces sensible Markdown. ~7.5s/page baseline.
+5. **Webhook reachability from Google** — pending real-world deploy
+   (needs DNS + reverse proxy on Unraid). The webhook handler,
+   authentication, and enqueue path are all unit-tested; the missing
+   piece is confirming Google's POSTs actually reach the container.
 
 ## 17. Milestones
 
-Suggested — pick apart or reorder as we go.
+- **M0** — ✅ Verification scripts, both gates passed (see §16).
+- **M1** — ✅ FastAPI + DBOS + health endpoints + Drive client +
+  `/webhooks/drive` route with authentication.
+- **M2** — ✅ Conversion path: `convert_note` + `run_sn2md` +
+  `conversion/paths.py` + state schema + DBOS singletons wired.
+  `debounce_file` deferred (see §5.3).
+- **M3** — ✅ `poll_changes`, `renew_watch_channel`, `delete_output`,
+  `backfill`. Cursor lifecycle + token verification in place.
+- **M4** — ✅ `/status`, real `/readyz`, Docker image (linuxserver
+  PUID/PGID), CI (`ci.yml`), multi-arch release workflow
+  (`release.yml`), standardized log events, BDD test refactor.
 
-- **M0 — Prove the risky bits** (verification tasks 1, 4). No app code
-  yet; ad-hoc scripts against real APIs.
-- **M1 — Skeleton service** — FastAPI + DBOS + Drive client stub +
-  health endpoints. No conversion yet. Deploys to Unraid, receives a
-  webhook.
-- **M2 — Conversion path** — `debounce_file` + `convert_note` +
-  `conversion_records`. Manual test: drop a `.note` in Drive, observe
-  Markdown in vault.
-- **M3 — Renewal + backfill + deletion** — the workflows that keep it
-  running and honest.
-- **M4 — Observability + hardening** — `/status`, structured logs,
-  concurrency/rate-limit tuning, CI green.
+### Remaining polish (not blocking)
+
+- `/status` `queue_depth` + `backfill.state` fields.
+- Multi-arch image published (needs a push to GitHub with the release
+  workflow).
+- First live end-to-end run against real Unraid + iterate on whatever
+  surfaces.
