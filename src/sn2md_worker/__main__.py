@@ -10,6 +10,7 @@ from sn2md_worker.app import create_app
 from sn2md_worker.config import Settings, load_settings
 from sn2md_worker.db import create_datasource, set_datasource
 from sn2md_worker.logging import configure_logging, get_logger
+from sn2md_worker.state import init_schema
 
 
 def main() -> int:
@@ -24,6 +25,9 @@ def main() -> int:
     dbos_config = _dbos_config(settings)
     log.info("dbos_init", database_url=dbos_config["system_database_url"])
     DBOS(config=dbos_config, fastapi=app)
+
+    init_schema(settings.database.url)
+    log.info("app_schema_ready")
 
     datasource = create_datasource(settings.database.url)
     set_datasource(datasource)
