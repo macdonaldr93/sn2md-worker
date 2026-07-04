@@ -33,28 +33,39 @@ def convert_note_impl(
 - `set_drive_client`, `set_settings`, `set_engine` are wired at startup
   by `__main__.py`; wrappers reach them via `get_*()`.
 
-## 2. Structured log events
+## 2. Structured log events + correlation
 
-Every impl body is:
+Every impl body opens a `bound_contextvars` scope so subsequent log
+calls inherit the workflow context automatically:
 
 ```python
-_log.info("<name>_started", **context)
-try:
-    ...
-    _log.info("<name>_succeeded", **outcome_counters)
-except Exception as exc:
-    _log.error("<name>_failed", error=str(exc), exc_info=True, **context)
-    raise
+def convert_note_impl(*, file_id, source_path, drive, settings):
+    key = logical_key(source_path)
+    with structlog.contextvars.bound_contextvars(
+        workflow="convert_note", file_id=file_id, logical_key=key
+    ):
+        _log.info("convert_note_started")
+        try:
+            ...
+            _log.info("convert_note_succeeded")
+        except Exception as exc:
+            _log.error("convert_note_failed", error=str(exc), exc_info=True)
+            raise
 ```
 
-Skips use:
+Skips use `reason=`:
 
 ```python
-_log.info("<name>_skipped", reason="up_to_date", **context)
+_log.info("convert_note_skipped", reason="up_to_date")
 ```
 
 Levels: INFO on happy path, WARNING for graceful degradation
 (configuration missing, safety guard tripped), ERROR for failures.
+
+HTTP requests get an outer `request_id` from
+`app.CorrelationIdMiddleware`; workflows run on DBOS worker threads
+that don't share those contextvars, so cross-boundary tracing uses
+`file_id` / `logical_key`.
 
 ## 3. Enqueueing from another workflow
 

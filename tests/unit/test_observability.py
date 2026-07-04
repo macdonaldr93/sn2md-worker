@@ -52,6 +52,32 @@ class TestHealthz:
         assert response.json() == {"status": "ok"}
 
 
+class TestCorrelationIdMiddleware:
+    def test_generates_and_returns_a_request_id_when_none_is_supplied(self, engine: Engine) -> None:
+        # GIVEN
+        set_settings(_settings())
+        client = TestClient(create_app())
+
+        # WHEN
+        response = client.get("/healthz")
+
+        # THEN — a fresh id is generated and echoed back
+        assert response.status_code == 200
+        assert response.headers.get("x-request-id")
+        assert len(response.headers["x-request-id"]) == 16
+
+    def test_echoes_the_supplied_request_id_unchanged(self, engine: Engine) -> None:
+        # GIVEN
+        set_settings(_settings())
+        client = TestClient(create_app())
+
+        # WHEN
+        response = client.get("/healthz", headers={"X-Request-Id": "trace-me-abc123"})
+
+        # THEN
+        assert response.headers["x-request-id"] == "trace-me-abc123"
+
+
 class TestReadyzInDevMode:
     def test_returns_200_when_webhook_url_is_empty(self, engine: Engine) -> None:
         # GIVEN — no webhook configured
@@ -181,6 +207,25 @@ class TestStatusEndpoint:
         assert body["watch_channel"]["channel_id"] == "chan-1"
         assert body["watch_channel"]["is_active"] is True
         assert body["change_cursor"]["page_token"] == "42"
+
+    def test_reports_zero_queue_depth_when_workflow_status_table_is_absent(
+        self, engine: Engine
+    ) -> None:
+        # GIVEN — no DBOS init, so `workflow_status` doesn't exist in the test DB
+        set_settings(_settings())
+        client = TestClient(create_app())
+
+        # WHEN
+        body = client.get("/status").json()
+
+        # THEN — the query gracefully falls back to defaults instead of 500ing
+        assert body["queue_depth"] == {"convert_queue": 0, "poll_queue": 0}
+        assert body["backfill"] == {
+            "status": None,
+            "started_at": None,
+            "completed_at": None,
+            "error": None,
+        }
 
     def test_returns_404_when_disabled(self, engine: Engine) -> None:
         # GIVEN

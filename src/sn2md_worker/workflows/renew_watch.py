@@ -4,6 +4,7 @@ import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
 
+import structlog
 from dbos import DBOS
 
 from sn2md_worker.config import Settings, get_settings
@@ -44,38 +45,31 @@ def renew_watch_channel_impl(
     now: datetime,
 ) -> None:
     """Idempotent renewal check: create a new channel if none active or ≤24h left."""
-    _log.info("renew_watch_started", trigger=trigger_source)
-    try:
-        if not settings.webhook.url:
-            _log.warning(
-                "renew_watch_skipped",
-                trigger=trigger_source,
-                reason="no_webhook_url",
-            )
-            return
+    with structlog.contextvars.bound_contextvars(
+        workflow="renew_watch_channel", trigger=trigger_source
+    ):
+        _log.info("renew_watch_started")
+        try:
+            if not settings.webhook.url:
+                _log.warning("renew_watch_skipped", reason="no_webhook_url")
+                return
 
-        with sql_session() as session:
-            active = watch_channels.get_active(session)
-        if active is not None and (active.expires_at - now) > RENEWAL_HEADROOM:
-            _log.info(
-                "renew_watch_skipped",
-                trigger=trigger_source,
-                reason="still_fresh",
-                channel_id=active.channel_id,
-                expires_at=active.expires_at.isoformat(),
-            )
-            return
+            with sql_session() as session:
+                active = watch_channels.get_active(session)
+            if active is not None and (active.expires_at - now) > RENEWAL_HEADROOM:
+                _log.info(
+                    "renew_watch_skipped",
+                    reason="still_fresh",
+                    channel_id=active.channel_id,
+                    expires_at=active.expires_at.isoformat(),
+                )
+                return
 
-        _create_and_activate(drive=drive, settings=settings, now=now, trigger=trigger_source)
-        _log.info("renew_watch_succeeded", trigger=trigger_source)
-    except Exception as exc:
-        _log.error(
-            "renew_watch_failed",
-            trigger=trigger_source,
-            error=str(exc),
-            exc_info=True,
-        )
-        raise
+            _create_and_activate(drive=drive, settings=settings, now=now, trigger=trigger_source)
+            _log.info("renew_watch_succeeded")
+        except Exception as exc:
+            _log.error("renew_watch_failed", error=str(exc), exc_info=True)
+            raise
 
 
 def ensure_active_channel(drive: DriveClient | None, settings: Settings) -> None:

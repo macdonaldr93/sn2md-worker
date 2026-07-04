@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import structlog
 from dbos import DBOS
 
 from sn2md_worker.config import Settings, get_settings
@@ -39,42 +40,37 @@ def poll_changes_impl(
     settings: Settings,
 ) -> None:
     """Walk changes since the last saved cursor and enqueue conversions."""
-    _log.info("poll_changes_started", trigger=trigger_source)
-    try:
-        page_token = _load_or_init_cursor(drive)
-        enqueued = 0
-        ignored = 0
+    with structlog.contextvars.bound_contextvars(workflow="poll_changes", trigger=trigger_source):
+        _log.info("poll_changes_started")
+        try:
+            page_token = _load_or_init_cursor(drive)
+            enqueued = 0
+            ignored = 0
 
-        while True:
-            page = drive.changes_list(page_token=page_token)
-            for change in page.changes:
-                if _dispatch(change, drive, settings):
-                    enqueued += 1
-                else:
-                    ignored += 1
-            if page.next_page_token:
-                page_token = page.next_page_token
-                continue
-            if page.new_start_page_token:
-                page_token = page.new_start_page_token
-            break
+            while True:
+                page = drive.changes_list(page_token=page_token)
+                for change in page.changes:
+                    if _dispatch(change, drive, settings):
+                        enqueued += 1
+                    else:
+                        ignored += 1
+                if page.next_page_token:
+                    page_token = page.next_page_token
+                    continue
+                if page.new_start_page_token:
+                    page_token = page.new_start_page_token
+                break
 
-        _save_cursor(page_token)
-        _log.info(
-            "poll_changes_succeeded",
-            trigger=trigger_source,
-            enqueued=enqueued,
-            ignored=ignored,
-            cursor=page_token,
-        )
-    except Exception as exc:
-        _log.error(
-            "poll_changes_failed",
-            trigger=trigger_source,
-            error=str(exc),
-            exc_info=True,
-        )
-        raise
+            _save_cursor(page_token)
+            _log.info(
+                "poll_changes_succeeded",
+                enqueued=enqueued,
+                ignored=ignored,
+                cursor=page_token,
+            )
+        except Exception as exc:
+            _log.error("poll_changes_failed", error=str(exc), exc_info=True)
+            raise
 
 
 def seed_cursor(drive: DriveClient) -> None:

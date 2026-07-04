@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+import structlog
 from dbos import DBOS
 
 from sn2md_worker.config import Settings, get_settings
@@ -39,53 +40,46 @@ def delete_output_impl(
     new file and leave the vault output untouched. Otherwise the per-note
     directory is removed and the record dropped.
     """
-    _log.info("delete_output_started", file_id=file_id)
-    try:
-        with sql_session() as session:
-            record = conversions.get_by_current_file_id(session, file_id)
+    with structlog.contextvars.bound_contextvars(workflow="delete_output", file_id=file_id):
+        _log.info("delete_output_started")
+        try:
+            with sql_session() as session:
+                record = conversions.get_by_current_file_id(session, file_id)
 
-        if record is None:
-            _log.info("delete_output_skipped", file_id=file_id, reason="no_record")
-            return
+            if record is None:
+                _log.info("delete_output_skipped", reason="no_record")
+                return
 
-        if record.parent_folder_id:
-            live = drive.find_live_note(record.parent_folder_id, record.source_name)
-            if live is not None and live.id != file_id:
-                _repoint(logical_key=record.logical_key, new_file_id=live.id)
-                _log.info(
+            if record.parent_folder_id:
+                live = drive.find_live_note(record.parent_folder_id, record.source_name)
+                if live is not None and live.id != file_id:
+                    _repoint(logical_key=record.logical_key, new_file_id=live.id)
+                    _log.info(
+                        "delete_output_skipped",
+                        reason="repointed_to_new_file",
+                        new_file_id=live.id,
+                        logical_key=record.logical_key,
+                    )
+                    return
+
+            if not _delete_from_vault(record.output_rel_path, settings.vault.root_path):
+                _log.warning(
                     "delete_output_skipped",
-                    file_id=file_id,
-                    reason="repointed_to_new_file",
-                    new_file_id=live.id,
+                    reason="vault_delete_refused",
                     logical_key=record.logical_key,
                 )
                 return
 
-        if not _delete_from_vault(record.output_rel_path, settings.vault.root_path):
-            _log.warning(
-                "delete_output_skipped",
-                file_id=file_id,
-                reason="vault_delete_refused",
+            with sql_session() as session, session.begin():
+                conversions.delete_by_logical_key(session, record.logical_key)
+            _log.info(
+                "delete_output_succeeded",
                 logical_key=record.logical_key,
+                output_rel_path=record.output_rel_path,
             )
-            return
-
-        with sql_session() as session, session.begin():
-            conversions.delete_by_logical_key(session, record.logical_key)
-        _log.info(
-            "delete_output_succeeded",
-            file_id=file_id,
-            logical_key=record.logical_key,
-            output_rel_path=record.output_rel_path,
-        )
-    except Exception as exc:
-        _log.error(
-            "delete_output_failed",
-            file_id=file_id,
-            error=str(exc),
-            exc_info=True,
-        )
-        raise
+        except Exception as exc:
+            _log.error("delete_output_failed", error=str(exc), exc_info=True)
+            raise
 
 
 def _repoint(*, logical_key: str, new_file_id: str) -> None:

@@ -645,20 +645,24 @@ LAN-only or behind reverse-proxy auth.
     ],
     "watch_channel":      {"channel_id": "...", "resource_id": "...",
                            "expires_at": "...", "is_active": true},
-    "change_cursor":      {"page_token": "...", "last_polled_at": "..."}
+    "change_cursor":      {"page_token": "...", "last_polled_at": "..."},
+    "queue_depth":        {"convert_queue": 0, "poll_queue": 0},
+    "backfill":           {"status": "SUCCESS", "started_at": "...",
+                           "completed_at": "...", "error": null}
   }
   ```
-  `queue_depth` and a `backfill` progress field are on the polish list
-  but not yet populated — DBOS doesn't expose queue depth cleanly and
-  we don't track backfill runs separately from the workflow log.
+  `queue_depth` and `backfill` are read via raw SQL against DBOS's own
+  `workflow_status` table (`observability._query_queue_depth` /
+  `_query_backfill_status`). If the table is missing (early test setup,
+  pre-`DBOS.launch()`), both fields fall back to zero / null defaults
+  instead of erroring the endpoint.
 
 ### Structured log events
 
 `structlog` JSON to stdout. Every workflow emits (event names,
 consistent across the codebase):
 
-- `<workflow>_started` — entry, INFO. Includes identifying context
-  (`file_id`, `logical_key`, `trigger`).
+- `<workflow>_started` — entry, INFO.
 - `<workflow>_succeeded` — happy exit, INFO. Includes outcome counters
   (`enqueued`, `skipped`) where relevant.
 - `<workflow>_failed` — ERROR, `exc_info=True` (full traceback in the
@@ -670,6 +674,29 @@ consistent across the codebase):
 
 Log levels: INFO for happy path, WARNING for graceful degradation
 (config missing, safety guard tripped), ERROR for failures.
+
+### Correlation IDs
+
+Every log line inside a request or workflow scope carries context that
+makes cross-service tracing possible:
+
+- **HTTP requests** — `app.CorrelationIdMiddleware` binds `request_id`
+  (from an incoming `X-Request-Id` header, else a fresh 16-char uuid4
+  hex), plus `method` and `path`, into structlog's contextvars for the
+  duration of the request. The same id is echoed back in the response
+  header. Grep the JSON log for `request_id` to follow a request end
+  to end.
+- **Workflows** — each `<workflow>_impl` opens
+  `structlog.contextvars.bound_contextvars(workflow=..., file_id=...,
+  logical_key=..., trigger=...)`. Every log line inside the scope
+  auto-picks up those fields so individual call sites don't repeat
+  them.
+
+Correlation across the enqueue boundary (webhook → `poll_changes`
+worker → `convert_note` worker) is not automatic — those run on
+separate DBOS worker threads. Use `file_id` / `logical_key` for
+cross-workflow tracing today; a workflow-arg-based propagation of an
+originating `request_id` is a future addition.
 
 ## 15. Testing strategy
 

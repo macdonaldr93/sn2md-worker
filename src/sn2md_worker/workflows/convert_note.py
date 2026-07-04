@@ -4,6 +4,7 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
+import structlog
 from dbos import DBOS
 
 from sn2md_worker.config import Settings, get_settings
@@ -45,64 +46,49 @@ def convert_note_impl(
 ) -> None:
     """Download → sn2md → upsert. Broken out so tests bypass DBOS."""
     key = logical_key(source_path)
-    _log.info("convert_note_started", file_id=file_id, logical_key=key)
-    try:
-        meta = drive.get_metadata(file_id)
-        if meta.trashed:
-            _log.info(
-                "convert_note_skipped",
+    with structlog.contextvars.bound_contextvars(
+        workflow="convert_note", file_id=file_id, logical_key=key
+    ):
+        _log.info("convert_note_started")
+        try:
+            meta = drive.get_metadata(file_id)
+            if meta.trashed:
+                _log.info("convert_note_skipped", reason="trashed")
+                return
+
+            if _already_up_to_date(key=key, file_id=file_id, md5=meta.md5_checksum):
+                _log.info("convert_note_skipped", reason="up_to_date")
+                return
+
+            with tempfile.TemporaryDirectory(prefix="sn2md-worker-") as tmp_root:
+                note_path = drive.download(file_id, Path(tmp_root), meta.name)
+                target_dir = sn2md_output_dir(source_path, settings.vault.root_path)
+                target_dir.mkdir(parents=True, exist_ok=True)
+
+                _log.info(
+                    "convert_note_running_sn2md",
+                    output_dir=str(target_dir),
+                    model=settings.sn2md.model,
+                )
+                run_sn2md(
+                    note_path=note_path,
+                    output_dir=target_dir,
+                    model=settings.sn2md.model,
+                    api_key=_resolve_gemini_key(settings),
+                )
+
+            _persist_success(
+                key=key,
                 file_id=file_id,
-                logical_key=key,
-                reason="trashed",
+                parent_folder_id=meta.parents[0] if meta.parents else None,
+                meta_name=meta.name,
+                meta_md5=meta.md5_checksum,
+                source_path=source_path,
             )
-            return
-
-        if _already_up_to_date(key=key, file_id=file_id, md5=meta.md5_checksum):
-            _log.info(
-                "convert_note_skipped",
-                file_id=file_id,
-                logical_key=key,
-                reason="up_to_date",
-            )
-            return
-
-        with tempfile.TemporaryDirectory(prefix="sn2md-worker-") as tmp_root:
-            note_path = drive.download(file_id, Path(tmp_root), meta.name)
-            target_dir = sn2md_output_dir(source_path, settings.vault.root_path)
-            target_dir.mkdir(parents=True, exist_ok=True)
-
-            _log.info(
-                "convert_note_running_sn2md",
-                file_id=file_id,
-                logical_key=key,
-                output_dir=str(target_dir),
-                model=settings.sn2md.model,
-            )
-            run_sn2md(
-                note_path=note_path,
-                output_dir=target_dir,
-                model=settings.sn2md.model,
-                api_key=_resolve_gemini_key(settings),
-            )
-
-        _persist_success(
-            key=key,
-            file_id=file_id,
-            parent_folder_id=meta.parents[0] if meta.parents else None,
-            meta_name=meta.name,
-            meta_md5=meta.md5_checksum,
-            source_path=source_path,
-        )
-        _log.info("convert_note_succeeded", file_id=file_id, logical_key=key)
-    except Exception as exc:
-        _log.error(
-            "convert_note_failed",
-            file_id=file_id,
-            logical_key=key,
-            error=str(exc),
-            exc_info=True,
-        )
-        raise
+            _log.info("convert_note_succeeded")
+        except Exception as exc:
+            _log.error("convert_note_failed", error=str(exc), exc_info=True)
+            raise
 
 
 def _already_up_to_date(*, key: str, file_id: str, md5: str | None) -> bool:
