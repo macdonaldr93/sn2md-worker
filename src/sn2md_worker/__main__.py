@@ -62,6 +62,11 @@ def main() -> int:
     workflows.register_queues()
     log.info("queues_registered")
 
+    workflows.register_schedules()
+    log.info("schedules_registered")
+
+    workflows.ensure_active_channel_if_ready(_current_drive_client(), settings)
+
     uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
     return 0
 

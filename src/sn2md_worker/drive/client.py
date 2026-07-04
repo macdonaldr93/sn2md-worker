@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -8,7 +10,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-from sn2md_worker.drive.models import ChangesPage, FileMetadata
+from sn2md_worker.drive.models import ChangesPage, ChannelInfo, FileMetadata
 
 __all__ = [
     "DEFAULT_CHANGES_FIELDS",
@@ -84,6 +86,48 @@ class DriveClient:
             )
         target.write_bytes(content)
         return target
+
+    def watch_changes(
+        self,
+        *,
+        webhook_url: str,
+        channel_id: str,
+        token: str,
+        start_page_token: str,
+        ttl_seconds: int,
+    ) -> ChannelInfo:
+        """Create a push-notification channel for changes.list.
+
+        Google enforces a maximum TTL of 7 days (604800s) on changes
+        channels; requesting more is silently capped.
+        """
+        expiration_ms = int(time.time() * 1000) + ttl_seconds * 1000
+        body = {
+            "id": channel_id,
+            "type": "web_hook",
+            "address": webhook_url,
+            "token": token,
+            "expiration": expiration_ms,
+        }
+        raw = self._call(
+            lambda: self._service.changes()
+            .watch(
+                pageToken=start_page_token,
+                includeRemoved=True,
+                restrictToMyDrive=False,
+                spaces="drive",
+                supportsAllDrives=False,
+                body=body,
+            )
+            .execute()
+        )
+        expiration = datetime.fromtimestamp(int(raw["expiration"]) / 1000, tz=UTC)
+        return ChannelInfo(
+            id=raw["id"],
+            resource_id=raw["resourceId"],
+            expiration=expiration,
+            token=token,
+        )
 
     def changes_list(
         self,
