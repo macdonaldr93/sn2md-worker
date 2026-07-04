@@ -70,6 +70,7 @@ class ConversionRecord(Base):
 
     logical_key: Mapped[str] = mapped_column(String, primary_key=True)
     current_file_id: Mapped[str] = mapped_column(String, index=True)
+    parent_folder_id: Mapped[str | None] = mapped_column(String, nullable=True)
     source_name: Mapped[str] = mapped_column(String)
     source_path: Mapped[str] = mapped_column(String)
     source_md5: Mapped[str | None] = mapped_column(String, nullable=True)

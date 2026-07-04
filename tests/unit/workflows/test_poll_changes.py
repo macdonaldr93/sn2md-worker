@@ -22,6 +22,7 @@ from sn2md_worker.drive.models import ChangeEvent, ChangesPage, FileMetadata
 from sn2md_worker.state import cursor
 from sn2md_worker.state.models import Base
 from sn2md_worker.workflows.convert_note import convert_note
+from sn2md_worker.workflows.delete_output import delete_output
 from sn2md_worker.workflows.poll_changes import CONVERT_QUEUE_NAME, poll_changes_impl, seed_cursor
 
 SOURCE_FOLDER_ID = "SRC"
@@ -122,10 +123,10 @@ class TestWhenChangesContainNonNoteFiles:
 
 
 class TestWhenChangesContainRemovalsOrTrashedFiles:
-    def test_removals_are_logged_and_skipped(
+    def test_removals_enqueue_delete_output(
         self, engine: Engine, settings: Settings, drive: MagicMock
     ) -> None:
-        # GIVEN
+        # GIVEN — a removal event
         drive.get_start_page_token.return_value = "1"
         drive.changes_list.return_value = ChangesPage(
             changes=(_removal("file-1"),),
@@ -136,13 +137,17 @@ class TestWhenChangesContainRemovalsOrTrashedFiles:
         with patch("sn2md_worker.workflows.poll_changes.DBOS.enqueue_workflow") as enqueue:
             poll_changes_impl(trigger_source="test", drive=drive, settings=settings)
 
-        # THEN — nothing enqueued (deletion mirroring lands in a later slice)
-        enqueue.assert_not_called()
+        # THEN — delete_output enqueued to the convert queue
+        enqueue.assert_called_once()
+        args, _ = enqueue.call_args
+        assert args[0] == CONVERT_QUEUE_NAME
+        assert args[1] is delete_output
+        assert args[2] == "file-1"
 
-    def test_trashed_files_are_skipped(
+    def test_trashed_files_enqueue_delete_output(
         self, engine: Engine, settings: Settings, drive: MagicMock
     ) -> None:
-        # GIVEN
+        # GIVEN — a change reporting a trashed file
         drive.get_start_page_token.return_value = "1"
         drive.changes_list.return_value = ChangesPage(
             changes=(
@@ -164,8 +169,11 @@ class TestWhenChangesContainRemovalsOrTrashedFiles:
         with patch("sn2md_worker.workflows.poll_changes.DBOS.enqueue_workflow") as enqueue:
             poll_changes_impl(trigger_source="test", drive=drive, settings=settings)
 
-        # THEN
-        enqueue.assert_not_called()
+        # THEN — treated as a soft delete
+        enqueue.assert_called_once()
+        args, _ = enqueue.call_args
+        assert args[1] is delete_output
+        assert args[2] == "file-1"
 
 
 class TestWhenChangeIsOutsideSourceFolder:

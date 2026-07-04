@@ -12,6 +12,7 @@ from sn2md_worker.drive.paths import resolve_source_path
 from sn2md_worker.logging import get_logger
 from sn2md_worker.state import cursor
 from sn2md_worker.workflows.convert_note import convert_note
+from sn2md_worker.workflows.delete_output import delete_output
 
 __all__ = ["CONVERT_QUEUE_NAME", "poll_changes", "poll_changes_impl", "seed_cursor"]
 
@@ -77,14 +78,18 @@ def seed_cursor(drive: DriveClient) -> None:
 
 
 def _dispatch(change: ChangeEvent, drive: DriveClient, settings: Settings) -> bool:
-    """Enqueue convert_note for eligible changes. Returns True if enqueued."""
+    """Enqueue convert_note (or delete_output) for eligible changes."""
     if change.removed:
-        _log.info("poll_changes_skip_removal_todo", file_id=change.file_id)
-        return False
+        DBOS.enqueue_workflow(CONVERT_QUEUE_NAME, delete_output, change.file_id)
+        _log.info("poll_changes_enqueued_delete", file_id=change.file_id)
+        return True
+
     if change.file is None:
         return False
     if change.file.trashed:
-        return False
+        DBOS.enqueue_workflow(CONVERT_QUEUE_NAME, delete_output, change.file_id)
+        _log.info("poll_changes_enqueued_delete_trashed", file_id=change.file_id)
+        return True
     if not change.file.name.lower().endswith(_NOTE_EXTENSION):
         return False
 

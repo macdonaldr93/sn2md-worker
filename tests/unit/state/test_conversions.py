@@ -15,6 +15,7 @@ def _make_upsert(**overrides: object) -> ConversionUpsert:
     base = dict(
         logical_key="Notebooks/Journal/2026-07.note",
         current_file_id="file-1",
+        parent_folder_id="parent-1",
         source_name="2026-07.note",
         source_path="Notebooks/Journal/2026-07.note",
         source_md5="abc123",

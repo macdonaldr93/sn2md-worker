@@ -76,6 +76,7 @@ def convert_note_impl(
     _persist_success(
         key=key,
         file_id=file_id,
+        parent_folder_id=meta.parents[0] if meta.parents else None,
         meta_name=meta.name,
         meta_md5=meta.md5_checksum,
         source_path=source_path,
@@ -99,6 +100,7 @@ def _persist_success(
     *,
     key: str,
     file_id: str,
+    parent_folder_id: str | None,
     meta_name: str,
     meta_md5: str | None,
     source_path: str,
@@ -109,6 +111,7 @@ def _persist_success(
             ConversionUpsert(
                 logical_key=key,
                 current_file_id=file_id,
+                parent_folder_id=parent_folder_id,
                 source_name=meta_name,
                 source_path=source_path,
                 source_md5=meta_md5,

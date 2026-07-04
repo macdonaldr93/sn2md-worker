@@ -22,6 +22,7 @@ __all__ = [
 class ConversionUpsert:
     logical_key: str
     current_file_id: str
+    parent_folder_id: str | None
     source_name: str
     source_path: str
     source_md5: str | None
@@ -37,6 +38,7 @@ def upsert(session: Session, data: ConversionUpsert) -> ConversionRecord:
         record = ConversionRecord(
             logical_key=data.logical_key,
             current_file_id=data.current_file_id,
+            parent_folder_id=data.parent_folder_id,
             source_name=data.source_name,
             source_path=data.source_path,
             source_md5=data.source_md5,
@@ -50,6 +52,7 @@ def upsert(session: Session, data: ConversionUpsert) -> ConversionRecord:
         return record
 
     record.current_file_id = data.current_file_id
+    record.parent_folder_id = data.parent_folder_id
     record.source_name = data.source_name
     record.source_path = data.source_path
     record.source_md5 = data.source_md5

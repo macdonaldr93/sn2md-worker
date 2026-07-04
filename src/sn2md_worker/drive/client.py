@@ -87,6 +87,33 @@ class DriveClient:
         target.write_bytes(content)
         return target
 
+    def find_live_note(self, parent_folder_id: str, name: str) -> FileMetadata | None:
+        """Return a live (non-trashed) file in the given folder matching `name`.
+
+        Used by delete_output to detect Supernote's replace-then-delete
+        pattern: if the delete event is for an old file_id but a new file
+        with the same name already exists at the same location, we
+        re-point rather than nuke the vault output.
+        """
+        escaped = name.replace("\\", "\\\\").replace("'", "\\'")
+        query = f"name = '{escaped}' and trashed = false " f"and '{parent_folder_id}' in parents"
+        raw = self._call(
+            lambda: self._service.files()
+            .list(
+                q=query,
+                fields=f"files({DEFAULT_FILE_FIELDS})",
+                pageSize=2,
+                spaces="drive",
+                supportsAllDrives=False,
+                includeItemsFromAllDrives=False,
+            )
+            .execute()
+        )
+        files = raw.get("files", [])
+        if not files:
+            return None
+        return FileMetadata.model_validate(files[0])
+
     def watch_changes(
         self,
         *,

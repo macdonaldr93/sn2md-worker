@@ -12,6 +12,7 @@ from dbos import DBOS
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.drive.client import DriveClient
 from sn2md_worker.workflows.convert_note import convert_note, convert_note_impl
+from sn2md_worker.workflows.delete_output import delete_output, delete_output_impl
 from sn2md_worker.workflows.poll_changes import (
     CONVERT_QUEUE_NAME,
     poll_changes,
@@ -35,6 +36,8 @@ __all__ = [
     "RENEW_SCHEDULE_NAME",
     "convert_note",
     "convert_note_impl",
+    "delete_output",
+    "delete_output_impl",
     "ensure_active_channel",
     "poll_changes",
     "poll_changes_impl",

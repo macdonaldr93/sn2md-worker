@@ -87,6 +87,7 @@ def test_converts_and_persists_new_note(
 
     assert record is not None
     assert record.current_file_id == "file-1"
+    assert record.parent_folder_id == "p1"
     assert record.source_md5 == "abc123"
     assert record.output_rel_path == "Notebooks/Journal/2026-07"
     assert record.last_status == ConversionStatus.SUCCESS
@@ -101,6 +102,7 @@ def test_skips_when_already_up_to_date(
             ConversionUpsert(
                 logical_key="Notebooks/2026-07.note",
                 current_file_id="file-1",
+                parent_folder_id="p1",
                 source_name="2026-07.note",
                 source_path="Notebooks/2026-07.note",
                 source_md5="abc123",
@@ -131,6 +133,7 @@ def test_reconverts_when_md5_changed(engine: Engine, settings: Settings, drive: 
             ConversionUpsert(
                 logical_key="Notebooks/2026-07.note",
                 current_file_id="file-old",
+                parent_folder_id="p1",
                 source_name="2026-07.note",
                 source_path="Notebooks/2026-07.note",
                 source_md5="old-md5",
