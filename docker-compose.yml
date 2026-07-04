@@ -1,0 +1,46 @@
+# Reference compose file for local dev and single-host deployments.
+# Follows linuxserver.io conventions (PUID / PGID / TZ / UMASK) so the
+# container fits Unraid appdata layouts.
+
+services:
+  sn2md-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sn2md-worker:latest
+    container_name: sn2md-worker
+    restart: unless-stopped
+    ports:
+      - "${WORKER_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      # linuxserver-style user/group + timezone. Set these in .env to match
+      # your host user so files written under /vault and /data end up with
+      # host-friendly ownership.
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      TZ: "${TZ:-Etc/UTC}"
+      UMASK: "${UMASK:-022}"
+      # Container-canonical paths (DB URL, vault root, credentials) are
+      # baked into the image; override in .env only if you need different
+      # mount points.
+    volumes:
+      # DBOS + application SQLite state.
+      - "${DATA_DIR:-./data}:/data"
+      # Obsidian vault directory (Obsidian on the host watches this).
+      - "${VAULT_DIR:-./vault}:/vault"
+      # Service account JSON key, read-only.
+      - "${SECRETS_DIR:-./secrets}:/secrets:ro"
+      # Optional TOML config. Uncomment when you have a config.toml.
+      # - "${CONFIG_FILE:-./config.toml}:/app/config.toml:ro"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - "-c"
+        - "import sys, urllib.request as u; sys.exit(0 if u.urlopen('http://localhost:8080/healthz').status==200 else 1)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s

@@ -1,0 +1,33 @@
+# Local state
+.venv/
+data/
+secrets/
+vault/
+config.toml
+.env
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Repo tooling not needed in the image
+.git/
+.github/
+.gitignore
+.pre-commit-config.yaml
+tests/
+scripts/
+docs/
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
