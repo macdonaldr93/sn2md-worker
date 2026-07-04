@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.uv-cache/
+
+# Tooling
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime state
+/data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
+
+# Local secrets & config
+config.toml
+.env
+service-account.json
+*.pem
+# Any credential JSON that lands here (defense in depth)
+/secrets/
+/*.json
+!/config.example.toml
+
+# Editor
+.vscode/
+.idea/
+.DS_Store

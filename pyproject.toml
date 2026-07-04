@@ -1,0 +1,66 @@
+[project]
+name = "sn2md-worker"
+version = "0.1.0"
+description = "Convert Supernote .note files from Google Drive to Obsidian Markdown"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Ryan Macdonald", email = "hi@ryanmacdonald.ca" }]
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "pydantic>=2.9",
+  "pydantic-settings>=2.6",
+  "google-api-python-client>=2.150",
+  "google-auth>=2.35",
+  "dbos>=2.26,<3",
+  "sn2md>=2.7.0",
+  "llm-gemini>=0.32",
+  "structlog>=24.4",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "respx>=0.21",
+  "httpx>=0.27",
+  "ruff>=0.7",
+  "mypy>=1.13",
+  "pre-commit>=4.0",
+]
+
+[project.scripts]
+sn2md-worker = "sn2md_worker.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sn2md_worker"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "A", "RET", "TID", "PL"]
+ignore = ["PLR0913"]
+
+[tool.ruff.lint.per-file-ignores]
+# Verification scripts are throwaway; keep them readable rather than golf them.
+"scripts/verify/*.py" = ["PLR0912", "PLR0915", "PLR2004", "PLC0415"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+packages = ["sn2md_worker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra"

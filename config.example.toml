@@ -1,0 +1,47 @@
+# sn2md-worker configuration
+# Copy to config.toml (gitignored) and fill in the drive + credentials fields.
+# Any value here can be overridden with SN2MD_WORKER__SECTION__KEY env vars.
+
+[drive]
+# Google Drive folder ID where the Supernote syncs .note files.
+source_folder_id = ""
+poll_debounce_stable_seconds = 30
+poll_debounce_interval_seconds = 10
+poll_debounce_max_iterations = 60
+watch_channel_ttl_days = 6
+fallback_poll_cron = "*/5 * * * *"
+
+[vault]
+# Filesystem path inside the container where sn2md output lands.
+# In production this is a bind mount to the Obsidian vault directory.
+root_path = "/vault"
+mirror_source_layout = true
+
+[sn2md]
+# llm-gemini requires the "gemini/" prefix on the model name.
+model = "gemini/gemini-2.5-pro"
+# api_key can be set here, or via env: LLM_GEMINI_KEY or SN2MD_WORKER__SN2MD__API_KEY
+
+[queue]
+convert_concurrency = 2
+convert_rate_limit_per_minute = 30
+debounce_concurrency = 8
+
+[observability]
+log_level = "INFO"
+status_endpoint_enabled = true
+
+[database]
+# Single SQLite/Postgres URL shared by DBOS's workflow state and our own
+# application tables (via dbos.SQLAlchemyDatasource). sqlite:/// prefix;
+# four slashes for absolute paths.
+url = "sqlite:///./data/sn2md-worker.sqlite"
+
+[webhook]
+# Public URL Google will POST change notifications to. Required in production;
+# optional during local development.
+url = ""
+
+[google]
+# Path (inside the container) to the service account JSON key.
+application_credentials = "/secrets/service-account.json"
