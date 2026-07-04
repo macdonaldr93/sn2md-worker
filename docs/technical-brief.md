@@ -159,8 +159,13 @@ def upsert_conversion(...) -> None:
     ...
 ```
 
-Application tables managed via SQLAlchemy declarative models so
-migrations are viable if needed later.
+Application tables managed via SQLAlchemy declarative models. **No
+migration framework** — `Base.metadata.create_all` runs on startup;
+column adds/renames require nuking the SQLite file and letting the
+`backfill` workflow re-populate `conversion_records` from Drive.
+Acceptable because Drive is source of truth and the vault also lives in
+Obsidian Sync. Revisit Alembic the first time that recovery path stops
+being cheap.
 
 **`conversion_records`** — one row per **logical** `.note` (Drive path +
 name), because Supernote sync replaces the file rather than updating in

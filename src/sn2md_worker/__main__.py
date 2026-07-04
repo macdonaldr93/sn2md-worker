@@ -9,6 +9,7 @@ from dbos import DBOS, DBOSConfig
 from sn2md_worker.app import create_app
 from sn2md_worker.config import Settings, load_settings
 from sn2md_worker.db import create_datasource, set_datasource
+from sn2md_worker.drive.client import DriveClient, DriveClientError, set_drive_client
 from sn2md_worker.logging import configure_logging, get_logger
 from sn2md_worker.state import init_schema
 
@@ -33,6 +34,8 @@ def main() -> int:
     set_datasource(datasource)
     log.info("datasource_ready")
 
+    _try_init_drive_client(settings)
+
     DBOS.launch()
     log.info("dbos_launched")
 
@@ -45,6 +48,21 @@ def _dbos_config(settings: Settings) -> DBOSConfig:
         name="sn2md-worker",
         system_database_url=settings.database.url,
     )
+
+
+def _try_init_drive_client(settings: Settings) -> None:
+    log = get_logger("sn2md_worker")
+    creds_path = settings.google.application_credentials
+    if not creds_path.is_file():
+        log.warning("drive_client_skipped_no_credentials", path=str(creds_path))
+        return
+    try:
+        client = DriveClient(creds_path)
+    except DriveClientError as exc:
+        log.error("drive_client_init_failed", error=str(exc))
+        return
+    set_drive_client(client)
+    log.info("drive_client_ready", service_account=client.service_account_email)
 
 
 def _prepare_sqlite_dir(database_url: str) -> None:
