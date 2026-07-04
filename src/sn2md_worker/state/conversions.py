@@ -13,6 +13,7 @@ __all__ = [
     "delete_by_logical_key",
     "get_by_current_file_id",
     "get_by_logical_key",
+    "list_recent_by_status",
     "record_failure",
     "upsert",
 ]
@@ -71,6 +72,19 @@ def get_by_logical_key(session: Session, logical_key: str) -> ConversionRecord |
 def get_by_current_file_id(session: Session, file_id: str) -> ConversionRecord | None:
     stmt = select(ConversionRecord).where(ConversionRecord.current_file_id == file_id)
     return session.execute(stmt).scalar_one_or_none()
+
+
+def list_recent_by_status(
+    session: Session, *, status: str, limit: int = 20
+) -> list[ConversionRecord]:
+    """Recent conversion records filtered by last_status, newest first."""
+    stmt = (
+        select(ConversionRecord)
+        .where(ConversionRecord.last_status == status)
+        .order_by(ConversionRecord.last_converted_at.desc())
+        .limit(limit)
+    )
+    return list(session.execute(stmt).scalars())
 
 
 def delete_by_logical_key(session: Session, logical_key: str) -> bool:
