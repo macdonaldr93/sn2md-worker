@@ -22,41 +22,50 @@ def _make(channel_id: str, **overrides: object) -> NewWatchChannel:
     return NewWatchChannel(**base)  # type: ignore[arg-type]
 
 
-def test_create_stores_channel_as_inactive(session: Session) -> None:
-    watch_channels.create(session, _make("chan-1"))
-    session.flush()
+class TestCreatingAChannel:
+    def test_stores_the_channel_as_inactive(self, session: Session) -> None:
+        # WHEN
+        watch_channels.create(session, _make("chan-1"))
+        session.flush()
 
-    channels = watch_channels.list_all(session)
-
-    assert len(channels) == 1
-    assert channels[0].channel_id == "chan-1"
-    assert channels[0].is_active is False
-
-
-def test_mark_active_promotes_one_and_deactivates_others(session: Session) -> None:
-    watch_channels.create(session, _make("chan-1"))
-    watch_channels.create(session, _make("chan-2"))
-    session.flush()
-
-    watch_channels.mark_active(session, "chan-1")
-    session.flush()
-
-    active = watch_channels.get_active(session)
-
-    assert active is not None
-    assert active.channel_id == "chan-1"
-
-    watch_channels.mark_active(session, "chan-2")
-    session.flush()
-
-    active = watch_channels.get_active(session)
-
-    assert active is not None
-    assert active.channel_id == "chan-2"
+        # THEN
+        channels = watch_channels.list_all(session)
+        assert len(channels) == 1
+        assert channels[0].channel_id == "chan-1"
+        assert channels[0].is_active is False
 
 
-def test_get_active_returns_none_when_no_active_channel(session: Session) -> None:
-    watch_channels.create(session, _make("chan-1"))
-    session.flush()
+class TestMarkingAChannelActive:
+    def test_promotes_the_named_channel_and_deactivates_any_others(self, session: Session) -> None:
+        # GIVEN — two inactive channels
+        watch_channels.create(session, _make("chan-1"))
+        watch_channels.create(session, _make("chan-2"))
+        session.flush()
 
-    assert watch_channels.get_active(session) is None
+        # WHEN
+        watch_channels.mark_active(session, "chan-1")
+        session.flush()
+
+        # THEN
+        active = watch_channels.get_active(session)
+        assert active is not None
+        assert active.channel_id == "chan-1"
+
+        # WHEN — a different channel is promoted
+        watch_channels.mark_active(session, "chan-2")
+        session.flush()
+
+        # THEN — the previous active channel is no longer active
+        active = watch_channels.get_active(session)
+        assert active is not None
+        assert active.channel_id == "chan-2"
+
+
+class TestGetActive:
+    def test_returns_none_when_no_channel_has_been_promoted(self, session: Session) -> None:
+        # GIVEN — a channel exists but none is active
+        watch_channels.create(session, _make("chan-1"))
+        session.flush()
+
+        # WHEN / THEN
+        assert watch_channels.get_active(session) is None
