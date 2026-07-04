@@ -99,6 +99,22 @@ def load_settings() -> Settings:
     return Settings()
 
 
+def get_settings() -> Settings:
+    """Return the process-wide Settings; raises if not yet initialized."""
+    if _Holder.settings is None:
+        raise RuntimeError("settings not initialized; call set_settings() at startup")
+    return _Holder.settings
+
+
+def set_settings(settings: Settings) -> None:
+    """Install the process-wide Settings. Call once from the entrypoint."""
+    _Holder.settings = settings
+
+
+class _Holder:
+    settings: Settings | None = None
+
+
 __all__ = [
     "DatabaseConfig",
     "DriveConfig",
@@ -110,5 +126,7 @@ __all__ = [
     "Sn2mdConfig",
     "VaultConfig",
     "WebhookConfig",
+    "get_settings",
     "load_settings",
+    "set_settings",
 ]

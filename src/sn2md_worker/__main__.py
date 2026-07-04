@@ -7,8 +7,13 @@ import uvicorn
 from dbos import DBOS, DBOSConfig
 
 from sn2md_worker.app import create_app
-from sn2md_worker.config import Settings, load_settings
-from sn2md_worker.db import create_datasource, set_datasource
+from sn2md_worker.config import Settings, load_settings, set_settings
+from sn2md_worker.db import (
+    create_datasource,
+    create_engine_for,
+    set_datasource,
+    set_engine,
+)
 from sn2md_worker.drive.client import DriveClient, DriveClientError, set_drive_client
 from sn2md_worker.logging import configure_logging, get_logger
 from sn2md_worker.state import init_schema
@@ -30,11 +35,15 @@ def main() -> int:
     init_schema(settings.database.url)
     log.info("app_schema_ready")
 
-    datasource = create_datasource(settings.database.url)
-    set_datasource(datasource)
+    set_settings(settings)
+    set_engine(create_engine_for(settings.database.url))
+    set_datasource(create_datasource(settings.database.url))
     log.info("datasource_ready")
 
     _try_init_drive_client(settings)
+
+    # Importing the workflows package registers @DBOS.workflow() decorators.
+    import sn2md_worker.workflows  # noqa: F401
 
     DBOS.launch()
     log.info("dbos_launched")

@@ -63,9 +63,8 @@ mypy_path = "src"
 packages = ["sn2md_worker"]
 
 [[tool.mypy.overrides]]
-module = ["googleapiclient.*", "google.oauth2.*"]
+module = ["googleapiclient.*", "google.oauth2.*", "sn2md.*", "numpy.*", "supernotelib.*"]
 ignore_missing_imports = true
-follow_untyped_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

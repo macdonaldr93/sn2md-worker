@@ -70,6 +70,21 @@ class DriveClient:
             raise DriveClientError(f"getStartPageToken returned unexpected shape: {raw!r}")
         return token
 
+    def download(self, file_id: str, dest_dir: Path, name: str) -> Path:
+        """Download a Drive file's content to `dest_dir/name`. Returns the path."""
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        target = dest_dir / name
+        try:
+            content = self._service.files().get_media(fileId=file_id).execute()
+        except HttpError as exc:
+            raise DriveClientError(f"files.get_media failed: {exc}") from exc
+        if not isinstance(content, bytes):
+            raise DriveClientError(
+                f"unexpected Drive media response type: {type(content).__name__}"
+            )
+        target.write_bytes(content)
+        return target
+
     def changes_list(
         self,
         page_token: str,
