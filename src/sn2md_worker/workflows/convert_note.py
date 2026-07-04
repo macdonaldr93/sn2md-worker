@@ -22,8 +22,12 @@ _log = get_logger("sn2md_worker.workflows.convert_note")
 
 
 @DBOS.workflow()
-def convert_note(*, file_id: str, source_path: str) -> None:
-    """DBOS-durable wrapper that delegates to the plain implementation."""
+def convert_note(file_id: str, source_path: str) -> None:
+    """DBOS-durable wrapper that delegates to the plain implementation.
+
+    Positional args because `DBOS.enqueue_workflow` is more ergonomic
+    that way; the impl still uses kwargs for readability at the call site.
+    """
     convert_note_impl(
         file_id=file_id,
         source_path=source_path,

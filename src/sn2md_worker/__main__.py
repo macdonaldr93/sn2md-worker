@@ -14,7 +14,12 @@ from sn2md_worker.db import (
     set_datasource,
     set_engine,
 )
-from sn2md_worker.drive.client import DriveClient, DriveClientError, set_drive_client
+from sn2md_worker.drive.client import (
+    DriveClient,
+    DriveClientError,
+    get_drive_client,
+    set_drive_client,
+)
 from sn2md_worker.logging import configure_logging, get_logger
 from sn2md_worker.state import init_schema
 
@@ -43,10 +48,19 @@ def main() -> int:
     _try_init_drive_client(settings)
 
     # Importing the workflows package registers @DBOS.workflow() decorators.
-    import sn2md_worker.workflows  # noqa: F401
+    from sn2md_worker import workflows
+
+    # DB-only, safe before DBOS is launched.
+    workflows.seed_cursor_if_ready(_current_drive_client())
 
     DBOS.launch()
     log.info("dbos_launched")
+
+    # register_queue needs a launched DBOS; a webhook that arrives in the
+    # micro-window before this point will fail to enqueue, and Google will
+    # retry with exponential backoff — acceptable.
+    workflows.register_queues()
+    log.info("queues_registered")
 
     uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
     return 0
@@ -57,6 +71,13 @@ def _dbos_config(settings: Settings) -> DBOSConfig:
         name="sn2md-worker",
         system_database_url=settings.database.url,
     )
+
+
+def _current_drive_client() -> DriveClient | None:
+    try:
+        return get_drive_client()
+    except RuntimeError:
+        return None
 
 
 def _try_init_drive_client(settings: Settings) -> None:
