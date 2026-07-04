@@ -23,7 +23,7 @@ able to start coding from here without re-litigating decisions.
     │  sn2md-worker container (Python, uv, DBOS)         │
     │                                                    │
     │  FastAPI HTTP layer                                │
-    │   ├── POST /drive/webhook                          │
+    │   ├── POST /webhooks/drive                          │
     │   ├── GET  /healthz  /readyz                       │
     │   └── GET  /status                                 │
     │                                                    │
@@ -69,7 +69,7 @@ sn2md-worker/
 │   ├── logging.py                  # structured JSON logger setup
 │   ├── drive/
 │   │   ├── client.py               # Google Drive API wrapper
-│   │   ├── webhook.py              # /drive/webhook route + verify
+│   │   ├── webhook.py              # /webhooks/drive route + verify
 │   │   └── models.py               # pydantic models for Drive resources
 │   ├── workflows/
 │   │   ├── renew_watch.py
@@ -458,7 +458,7 @@ on the source folder + descendants.
 ## 8. Webhook (`drive/webhook.py`)
 
 ```
-POST /drive/webhook
+POST /webhooks/drive
 Headers of interest:
   X-Goog-Channel-Id, X-Goog-Channel-Token,
   X-Goog-Resource-Id, X-Goog-Resource-State, X-Goog-Message-Number
@@ -575,12 +575,12 @@ services:
 LLM_GEMINI_KEY=...
 GOOGLE_APPLICATION_CREDENTIALS=/secrets/service-account.json
 SN2MD_WORKER__DRIVE__SOURCE_FOLDER_ID=...
-SN2MD_WORKER__WEBHOOK_URL=https://sn2md.example.com/drive/webhook
+SN2MD_WORKER__WEBHOOK_URL=https://sn2md.example.com/webhooks/drive
 ```
 
 ### Reverse proxy
 
-Route `sn2md.<domain>/drive/webhook` → `sn2md-worker:8080/drive/webhook`.
+Route `sn2md.<domain>/webhooks/drive` → `sn2md-worker:8080/webhooks/drive`.
 Terminate TLS at the proxy (Let's Encrypt is fine). Only expose the
 webhook path publicly if you want to lock it down; `/status`,
 `/healthz`, `/readyz` should be reachable only from your LAN.
@@ -601,7 +601,7 @@ webhook path publicly if you want to lock it down; `/status`,
 4. **Public webhook URL**
    - Add DNS `sn2md.<yourdomain>` → Unraid.
    - Wire your existing reverse proxy to route
-     `/drive/webhook` to the container's port 8080.
+     `/webhooks/drive` to the container's port 8080.
    - Confirm the URL is reachable externally with a valid TLS cert (curl
      from an off-network machine).
 5. **Vault path**

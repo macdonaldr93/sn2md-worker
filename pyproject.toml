@@ -52,6 +52,8 @@ ignore = ["PLR0913"]
 [tool.ruff.lint.per-file-ignores]
 # Verification scripts are throwaway; keep them readable rather than golf them.
 "scripts/verify/*.py" = ["PLR0912", "PLR0915", "PLR2004", "PLC0415"]
+# Test assertions naturally contain literals (status codes, expected sizes).
+"tests/**/*.py" = ["PLR2004"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -59,6 +61,11 @@ strict = true
 plugins = ["pydantic.mypy"]
 mypy_path = "src"
 packages = ["sn2md_worker"]
+
+[[tool.mypy.overrides]]
+module = ["googleapiclient.*", "google.oauth2.*"]
+ignore_missing_imports = true
+follow_untyped_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -45,7 +45,7 @@ Runs continuously as a Docker container on my Unraid server.
   catches up whenever a webhook is missed (network glitch, container
   restart, expired channel).
 - **Public URL**: existing reverse proxy on Unraid handles TLS + routing to
-  the worker container. Webhook path suggested: `/drive/webhook`.
+  the worker container. Webhook path suggested: `/webhooks/drive`.
 - **Watch channel renewal**: Confirmed max TTL 7 days (604800s) for
   `changes.watch`; no automatic renewal — the worker creates a fresh channel
   with a new random `id` before expiry (scheduled DBOS workflow every ~6
