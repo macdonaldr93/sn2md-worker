@@ -44,28 +44,44 @@ def renew_watch_channel_impl(
     now: datetime,
 ) -> None:
     """Idempotent renewal check: create a new channel if none active or ≤24h left."""
-    if not settings.webhook.url:
-        _log.warning("renew_watch_skipped_no_webhook_url", trigger=trigger_source)
-        return
+    _log.info("renew_watch_started", trigger=trigger_source)
+    try:
+        if not settings.webhook.url:
+            _log.warning(
+                "renew_watch_skipped",
+                trigger=trigger_source,
+                reason="no_webhook_url",
+            )
+            return
 
-    with sql_session() as session:
-        active = watch_channels.get_active(session)
-    if active is not None and (active.expires_at - now) > RENEWAL_HEADROOM:
-        _log.info(
-            "renew_watch_skipped_still_fresh",
+        with sql_session() as session:
+            active = watch_channels.get_active(session)
+        if active is not None and (active.expires_at - now) > RENEWAL_HEADROOM:
+            _log.info(
+                "renew_watch_skipped",
+                trigger=trigger_source,
+                reason="still_fresh",
+                channel_id=active.channel_id,
+                expires_at=active.expires_at.isoformat(),
+            )
+            return
+
+        _create_and_activate(drive=drive, settings=settings, now=now, trigger=trigger_source)
+        _log.info("renew_watch_succeeded", trigger=trigger_source)
+    except Exception as exc:
+        _log.error(
+            "renew_watch_failed",
             trigger=trigger_source,
-            channel_id=active.channel_id,
-            expires_at=active.expires_at.isoformat(),
+            error=str(exc),
+            exc_info=True,
         )
-        return
-
-    _create_and_activate(drive=drive, settings=settings, now=now, trigger=trigger_source)
+        raise
 
 
 def ensure_active_channel(drive: DriveClient | None, settings: Settings) -> None:
     """Startup helper: seed the first channel if there isn't one."""
     if drive is None:
-        _log.warning("ensure_active_channel_skipped_no_drive_client")
+        _log.warning("renew_watch_skipped", trigger="startup", reason="no_drive_client")
         return
     renew_watch_channel_impl(
         trigger_source="startup",
@@ -106,7 +122,7 @@ def _create_and_activate(
         watch_channels.mark_active(session, info.id)
 
     _log.info(
-        "renew_watch_created_channel",
+        "renew_watch_channel_created",
         trigger=trigger,
         channel_id=info.id,
         resource_id=info.resource_id,

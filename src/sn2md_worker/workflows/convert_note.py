@@ -45,43 +45,64 @@ def convert_note_impl(
 ) -> None:
     """Download → sn2md → upsert. Broken out so tests bypass DBOS."""
     key = logical_key(source_path)
-    meta = drive.get_metadata(file_id)
-    if meta.trashed:
-        _log.info("convert_note_skip_trashed", file_id=file_id, logical_key=key)
-        return
+    _log.info("convert_note_started", file_id=file_id, logical_key=key)
+    try:
+        meta = drive.get_metadata(file_id)
+        if meta.trashed:
+            _log.info(
+                "convert_note_skipped",
+                file_id=file_id,
+                logical_key=key,
+                reason="trashed",
+            )
+            return
 
-    if _already_up_to_date(key=key, file_id=file_id, md5=meta.md5_checksum):
-        _log.info("convert_note_skip_up_to_date", file_id=file_id, logical_key=key)
-        return
+        if _already_up_to_date(key=key, file_id=file_id, md5=meta.md5_checksum):
+            _log.info(
+                "convert_note_skipped",
+                file_id=file_id,
+                logical_key=key,
+                reason="up_to_date",
+            )
+            return
 
-    with tempfile.TemporaryDirectory(prefix="sn2md-worker-") as tmp_root:
-        note_path = drive.download(file_id, Path(tmp_root), meta.name)
-        target_dir = sn2md_output_dir(source_path, settings.vault.root_path)
-        target_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="sn2md-worker-") as tmp_root:
+            note_path = drive.download(file_id, Path(tmp_root), meta.name)
+            target_dir = sn2md_output_dir(source_path, settings.vault.root_path)
+            target_dir.mkdir(parents=True, exist_ok=True)
 
-        _log.info(
-            "convert_note_run",
+            _log.info(
+                "convert_note_running_sn2md",
+                file_id=file_id,
+                logical_key=key,
+                output_dir=str(target_dir),
+                model=settings.sn2md.model,
+            )
+            run_sn2md(
+                note_path=note_path,
+                output_dir=target_dir,
+                model=settings.sn2md.model,
+                api_key=_resolve_gemini_key(settings),
+            )
+
+        _persist_success(
+            key=key,
+            file_id=file_id,
+            parent_folder_id=meta.parents[0] if meta.parents else None,
+            meta_name=meta.name,
+            meta_md5=meta.md5_checksum,
+            source_path=source_path,
+        )
+        _log.info("convert_note_succeeded", file_id=file_id, logical_key=key)
+    except Exception as exc:
+        _log.error(
+            "convert_note_failed",
             file_id=file_id,
             logical_key=key,
-            output_dir=str(target_dir),
-            model=settings.sn2md.model,
+            error=str(exc),
+            exc_info=True,
         )
-        run_sn2md(
-            note_path=note_path,
-            output_dir=target_dir,
-            model=settings.sn2md.model,
-            api_key=_resolve_gemini_key(settings),
-        )
-
-    _persist_success(
-        key=key,
-        file_id=file_id,
-        parent_folder_id=meta.parents[0] if meta.parents else None,
-        meta_name=meta.name,
-        meta_md5=meta.md5_checksum,
-        source_path=source_path,
-    )
-    _log.info("convert_note_success", file_id=file_id, logical_key=key)
+        raise
 
 
 def _already_up_to_date(*, key: str, file_id: str, md5: str | None) -> bool:

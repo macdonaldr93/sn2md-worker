@@ -25,20 +25,25 @@ def backfill() -> None:
 
 def backfill_impl(*, drive: DriveClient, settings: Settings) -> None:
     """Walk the source folder tree and enqueue conversions for anything stale."""
-    if not settings.drive.source_folder_id:
-        _log.warning("backfill_skipped_no_source_folder")
-        return
+    _log.info("backfill_started")
+    try:
+        if not settings.drive.source_folder_id:
+            _log.warning("backfill_skipped", reason="no_source_folder")
+            return
 
-    enqueued = 0
-    skipped = 0
-    for file, source_path in drive.list_all_notes(settings.drive.source_folder_id):
-        if _needs_conversion(source_path=source_path, md5=file.md5_checksum):
-            DBOS.enqueue_workflow(CONVERT_QUEUE_NAME, convert_note, file.id, source_path)
-            enqueued += 1
-        else:
-            skipped += 1
+        enqueued = 0
+        skipped = 0
+        for file, source_path in drive.list_all_notes(settings.drive.source_folder_id):
+            if _needs_conversion(source_path=source_path, md5=file.md5_checksum):
+                DBOS.enqueue_workflow(CONVERT_QUEUE_NAME, convert_note, file.id, source_path)
+                enqueued += 1
+            else:
+                skipped += 1
 
-    _log.info("backfill_complete", enqueued=enqueued, skipped=skipped)
+        _log.info("backfill_succeeded", enqueued=enqueued, skipped=skipped)
+    except Exception as exc:
+        _log.error("backfill_failed", error=str(exc), exc_info=True)
+        raise
 
 
 def _needs_conversion(*, source_path: str, md5: str | None) -> bool:
