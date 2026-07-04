@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,7 @@ __all__ = [
     "DEFAULT_CHANGES_FIELDS",
     "DEFAULT_FILE_FIELDS",
     "DEFAULT_SCOPES",
+    "DRIVE_FOLDER_MIME",
     "DriveClient",
     "DriveClientError",
     "get_drive_client",
@@ -30,6 +31,8 @@ DEFAULT_CHANGES_FIELDS = (
     "changes(fileId,removed,time,"
     "file(id,name,md5Checksum,parents,mimeType,trashed,modifiedTime))"
 )
+DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
+_NOTE_EXTENSION = ".note"
 
 
 class DriveClientError(RuntimeError):
@@ -86,6 +89,25 @@ class DriveClient:
             )
         target.write_bytes(content)
         return target
+
+    def list_all_notes(self, folder_id: str) -> Iterator[tuple[FileMetadata, str]]:
+        """Walk the folder tree rooted at `folder_id` and yield every .note.
+
+        Each yield is `(file_metadata, source_path)` where `source_path` is
+        the POSIX path relative to `folder_id` (e.g. `Notebooks/2026-07.note`
+        for a note two levels deep). Folder traversal is depth-first via an
+        explicit stack; pagination inside a folder is handled by
+        `_list_children`.
+        """
+        stack: list[tuple[str, str]] = [(folder_id, "")]
+        while stack:
+            current_id, current_path = stack.pop()
+            for child in self._list_children(current_id):
+                child_path = f"{current_path}/{child.name}" if current_path else child.name
+                if child.mime_type == DRIVE_FOLDER_MIME:
+                    stack.append((child.id, child_path))
+                elif child.name.lower().endswith(_NOTE_EXTENSION) and not child.trashed:
+                    yield (child, child_path)
 
     def find_live_note(self, parent_folder_id: str, name: str) -> FileMetadata | None:
         """Return a live (non-trashed) file in the given folder matching `name`.
@@ -178,6 +200,33 @@ class DriveClient:
             .execute()
         )
         return ChangesPage.model_validate(raw)
+
+    def _list_children(self, folder_id: str) -> Iterator[FileMetadata]:
+        page_token: str | None = None
+        while True:
+            try:
+                raw = (
+                    self._service.files()
+                    .list(
+                        q=f"'{folder_id}' in parents and trashed = false",
+                        fields=f"nextPageToken,files({DEFAULT_FILE_FIELDS})",
+                        pageSize=100,
+                        spaces="drive",
+                        supportsAllDrives=False,
+                        includeItemsFromAllDrives=False,
+                        pageToken=page_token,
+                    )
+                    .execute()
+                )
+            except HttpError as exc:
+                raise DriveClientError(f"files.list failed: {exc}") from exc
+            if not isinstance(raw, dict):
+                raise DriveClientError(f"unexpected files.list response type: {type(raw).__name__}")
+            for entry in raw.get("files", []):
+                yield FileMetadata.model_validate(entry)
+            page_token = raw.get("nextPageToken")
+            if not page_token:
+                break
 
     @staticmethod
     def _call(action: Any) -> dict[str, Any]:

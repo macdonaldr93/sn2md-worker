@@ -11,6 +11,7 @@ from dbos import DBOS
 
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.drive.client import DriveClient
+from sn2md_worker.workflows.backfill import backfill, backfill_impl
 from sn2md_worker.workflows.convert_note import convert_note, convert_note_impl
 from sn2md_worker.workflows.delete_output import delete_output, delete_output_impl
 from sn2md_worker.workflows.poll_changes import (
@@ -34,10 +35,13 @@ __all__ = [
     "POLL_QUEUE_NAME",
     "RENEW_SCHEDULE_CRON",
     "RENEW_SCHEDULE_NAME",
+    "backfill",
+    "backfill_impl",
     "convert_note",
     "convert_note_impl",
     "delete_output",
     "delete_output_impl",
+    "enqueue_startup_backfill",
     "ensure_active_channel",
     "poll_changes",
     "poll_changes_impl",
@@ -80,3 +84,12 @@ def seed_cursor_if_ready(drive: DriveClient | None) -> None:
 def ensure_active_channel_if_ready(drive: DriveClient | None, settings: Settings) -> None:
     """Seed the first watch channel at startup if we can."""
     ensure_active_channel(drive, settings)
+
+
+def enqueue_startup_backfill() -> None:
+    """Enqueue the backfill workflow to run once at startup.
+
+    Idempotent — backfill only enqueues convert_note for notes that are
+    missing or whose md5 has changed, so a spurious run is a no-op.
+    """
+    DBOS.enqueue_workflow(POLL_QUEUE_NAME, backfill)

@@ -67,6 +67,10 @@ def main() -> int:
 
     workflows.ensure_active_channel_if_ready(_current_drive_client(), settings)
 
+    if _current_drive_client() is not None:
+        workflows.enqueue_startup_backfill()
+        log.info("backfill_enqueued")
+
     uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
     return 0
 
