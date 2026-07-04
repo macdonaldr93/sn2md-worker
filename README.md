@@ -60,6 +60,21 @@ transcribe a note via your Gemini key. Both scripts are self-contained
 
 ### 2. Deploy
 
+Two options.
+
+**From the published image** (recommended for Unraid — pulls the multi-arch
+image from GitHub Container Registry, no local build):
+
+```sh
+docker pull ghcr.io/macdonaldr93/sn2md-worker:latest
+```
+
+Then adapt the `image:` line in your `docker-compose.yml` to
+`ghcr.io/macdonaldr93/sn2md-worker:latest` and skip the `build:` block.
+Available platforms: `linux/amd64`, `linux/arm64`.
+
+**From source** (local build):
+
 ```sh
 git clone https://github.com/macdonaldr93/sn2md-worker.git
 cd sn2md-worker
