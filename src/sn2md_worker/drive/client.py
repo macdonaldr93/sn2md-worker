@@ -118,18 +118,20 @@ class DriveClient:
         re-point rather than nuke the vault output.
         """
         escaped = name.replace("\\", "\\\\").replace("'", "\\'")
-        query = f"name = '{escaped}' and trashed = false " f"and '{parent_folder_id}' in parents"
+        query = f"name = '{escaped}' and trashed = false and '{parent_folder_id}' in parents"
         raw = self._call(
-            lambda: self._service.files()
-            .list(
-                q=query,
-                fields=f"files({DEFAULT_FILE_FIELDS})",
-                pageSize=2,
-                spaces="drive",
-                supportsAllDrives=False,
-                includeItemsFromAllDrives=False,
+            lambda: (
+                self._service.files()
+                .list(
+                    q=query,
+                    fields=f"files({DEFAULT_FILE_FIELDS})",
+                    pageSize=2,
+                    spaces="drive",
+                    supportsAllDrives=False,
+                    includeItemsFromAllDrives=False,
+                )
+                .execute()
             )
-            .execute()
         )
         files = raw.get("files", [])
         if not files:
@@ -159,16 +161,18 @@ class DriveClient:
             "expiration": expiration_ms,
         }
         raw = self._call(
-            lambda: self._service.changes()
-            .watch(
-                pageToken=start_page_token,
-                includeRemoved=True,
-                restrictToMyDrive=False,
-                spaces="drive",
-                supportsAllDrives=False,
-                body=body,
+            lambda: (
+                self._service.changes()
+                .watch(
+                    pageToken=start_page_token,
+                    includeRemoved=True,
+                    restrictToMyDrive=False,
+                    spaces="drive",
+                    supportsAllDrives=False,
+                    body=body,
+                )
+                .execute()
             )
-            .execute()
         )
         expiration = datetime.fromtimestamp(int(raw["expiration"]) / 1000, tz=UTC)
         return ChannelInfo(
@@ -187,17 +191,19 @@ class DriveClient:
         page_size: int = 100,
     ) -> ChangesPage:
         raw = self._call(
-            lambda: self._service.changes()
-            .list(
-                pageToken=page_token,
-                includeRemoved=include_removed,
-                restrictToMyDrive=False,
-                spaces="drive",
-                fields=fields,
-                supportsAllDrives=False,
-                pageSize=page_size,
+            lambda: (
+                self._service.changes()
+                .list(
+                    pageToken=page_token,
+                    includeRemoved=include_removed,
+                    restrictToMyDrive=False,
+                    spaces="drive",
+                    fields=fields,
+                    supportsAllDrives=False,
+                    pageSize=page_size,
+                )
+                .execute()
             )
-            .execute()
         )
         return ChangesPage.model_validate(raw)
 

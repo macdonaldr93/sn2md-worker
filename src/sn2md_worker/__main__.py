@@ -48,7 +48,9 @@ def main() -> int:
     _try_init_drive_client(settings)
 
     # Importing the workflows package registers @DBOS.workflow() decorators.
-    from sn2md_worker import workflows
+    # Deferred so that settings/engine/drive-client singletons are ready
+    # before workflow modules resolve them at import time.
+    from sn2md_worker import workflows  # noqa: PLC0415
 
     # DB-only, safe before DBOS is launched.
     workflows.seed_cursor_if_ready(_current_drive_client())
