@@ -193,9 +193,14 @@ class TestWhenTheFileIsTrashed:
 
 class TestWhenNoGeminiKeyIsConfigured:
     def test_raises_a_configuration_error(
-        self, engine: Engine, drive: MagicMock, tmp_path: Path
+        self,
+        engine: Engine,
+        drive: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        # GIVEN
+        # GIVEN — neither settings.sn2md.api_key nor LLM_GEMINI_KEY is set
+        monkeypatch.delenv("LLM_GEMINI_KEY", raising=False)
         settings = Settings(
             vault=VaultConfig(root_path=tmp_path / "vault", mirror_source_layout=True),
             sn2md=Sn2mdConfig(model="fake", api_key=None),
@@ -214,3 +219,32 @@ class TestWhenNoGeminiKeyIsConfigured:
                 drive=drive,
                 settings=settings,
             )
+
+    def test_falls_back_to_llm_gemini_key_env_var(
+        self,
+        engine: Engine,
+        drive: MagicMock,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # GIVEN — no api_key in settings but LLM_GEMINI_KEY set in env
+        monkeypatch.setenv("LLM_GEMINI_KEY", "from-env")
+        settings = Settings(
+            vault=VaultConfig(root_path=tmp_path / "vault", mirror_source_layout=True),
+            sn2md=Sn2mdConfig(model="fake-model", api_key=None),
+        )
+        drive.get_metadata.return_value = _file_metadata()
+        _stub_download(drive)
+
+        # WHEN
+        with patch("sn2md_worker.workflows.convert_note.run_sn2md") as fake_run:
+            convert_note_impl(
+                file_id="file-1",
+                source_path="Notebooks/2026-07.note",
+                drive=drive,
+                settings=settings,
+            )
+
+        # THEN — the env var value was passed through to sn2md
+        fake_run.assert_called_once()
+        assert fake_run.call_args.kwargs["api_key"] == "from-env"

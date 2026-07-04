@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -130,8 +131,12 @@ def _persist_success(
 
 
 def _resolve_gemini_key(settings: Settings) -> str:
-    if settings.sn2md.api_key is None:
-        raise RuntimeError(
-            "no Gemini API key configured; set sn2md.api_key or SN2MD_WORKER__SN2MD__API_KEY"
-        )
-    return settings.sn2md.api_key.get_secret_value()
+    if settings.sn2md.api_key is not None:
+        return settings.sn2md.api_key.get_secret_value()
+    env_key = os.environ.get("LLM_GEMINI_KEY", "")
+    if env_key:
+        return env_key
+    raise RuntimeError(
+        "no Gemini API key configured; set LLM_GEMINI_KEY env var, "
+        "sn2md.api_key in config.toml, or SN2MD_WORKER__SN2MD__API_KEY"
+    )
