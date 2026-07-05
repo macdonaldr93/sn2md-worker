@@ -396,13 +396,13 @@ class TestGetHttpIsPerThread:
         for thread_id, http_id in observed:
             by_thread.setdefault(thread_id, set()).add(http_id)
 
-        assert all(
-            len(hs) == 1 for hs in by_thread.values()
-        ), "same thread returned multiple Http instances"
+        assert all(len(hs) == 1 for hs in by_thread.values()), (
+            "same thread returned multiple Http instances"
+        )
         all_http_ids = {next(iter(hs)) for hs in by_thread.values()}
-        assert len(all_http_ids) == len(
-            by_thread
-        ), "different threads shared the same Http instance — not thread-safe"
+        assert len(all_http_ids) == len(by_thread), (
+            "different threads shared the same Http instance — not thread-safe"
+        )
 
 
 class TestDriveClientConstructorWrapsMalformedKey:
