@@ -58,9 +58,12 @@ Runs continuously as a Docker container on my Unraid server.
 - **Public URL**: existing reverse proxy on Unraid handles TLS + routing to
   the worker container. Webhook path suggested: `/webhooks/drive`.
 - **Watch channel renewal**: Confirmed max TTL 7 days (604800s) for
-  `changes.watch`; no automatic renewal — the worker creates a fresh channel
-  with a new random `id` before expiry (scheduled DBOS workflow every ~6
-  days).
+  `changes.watch`; no automatic renewal on Drive's side. We omit
+  `expiration` from the `watch_changes` request so Drive picks its own
+  max (avoiding host-clock skew), then a daily DBOS cron
+  (`renew_watch_channel`) creates a fresh channel when the current one
+  is within `RENEWAL_HEADROOM = 48h` of expiry (5-day cadence in
+  practice).
 - **Webhook authenticity**: `token` field set at channel creation (32-byte
   random hex), echoed as `X-Goog-Channel-Token` on every notification.
   Worker verifies token + `X-Goog-Channel-Id` against the active channel
@@ -177,7 +180,7 @@ Runs continuously as a Docker container on my Unraid server.
 
 ### Testing
 
-- **Unit tests** (`tests/unit/`): 111 tests, in-memory SQLite. BDD
+- **Unit tests** (`tests/unit/`): 206 tests, in-memory SQLite. BDD
   scenario classes for behavior (workflows, webhook, repos); plain
   functions for pure logic (path helpers, model alias mapping,
   TypeDecorator).

@@ -55,9 +55,37 @@ a Docker container on Unraid.
 
 7. **linuxserver-style entrypoint** (`docker/entrypoint.sh`) — the
    image starts as root, `usermod -o` reshapes the `app` user to match
-   PUID/PGID, chowns writable volumes, then `exec gosu app:app "$@"`.
-   CMD invokes `python` from `/app/.venv/bin/python` directly — do NOT
-   go through `uv run` at container start (it triggers a dev-dep sync).
+   PUID/PGID, chowns writable volumes (`/data` and `/vault` only —
+   `/app/.venv` is already app-owned at build time), then
+   `exec gosu app:app "$@"`. CMD invokes `python` from
+   `/app/.venv/bin/python` directly — do NOT go through `uv run` at
+   container start (it triggers a dev-dep sync).
+
+8. **Load-bearing subsystems worth naming.**
+   - **SQLite tuning**: `db.py` registers a global connect listener that
+     sets WAL + `busy_timeout=30000` + `synchronous=NORMAL` + foreign
+     keys on every SQLite connection in the process (ours and DBOS's).
+     `_dbos_config` also passes `check_same_thread=False` + `timeout=30`
+     into DBOS's engine_kwargs — required for FastAPI's threadpool +
+     DBOS's executor to share connections safely.
+   - **Atomic upserts**: state repos use SQLite `INSERT ... ON CONFLICT
+     DO UPDATE` (single statement per write). No get-then-set race.
+   - **Per-key filelock** (`workflows/convert_note._lock_for`): OS
+     advisory lock keyed on a SHA-256 of `logical_key`, lockfiles in
+     `/tmp/sn2md-worker-locks/`. Serializes concurrent conversions of
+     the same note across DBOS workers (and would across containers).
+   - **Retry taxonomy**: `drive/client.py` distinguishes
+     `DrivePermanentError` (4xx-except-429) from `DriveTransientError`
+     (5xx / 429 / network). `poll_changes` catches permanent to
+     log-skip; transient propagates so DBOS retries the workflow.
+     Gemini retries via tenacity in `conversion/multi_page.py`.
+   - **View dataclasses**: state repo getters return frozen
+     `<Entity>View` dataclasses, not ORM instances. Callers can hold
+     them past session close without `DetachedInstanceError`.
+   - **Path sanitization**: `conversion/paths._reject_unsafe_component`
+     rejects `..`, NUL, empty segments, and Windows-reserved names
+     (`CON`/`NUL`/`COM[1-9]`/`LPT[1-9]`) before anything reaches the
+     vault. `find_live_note` refuses non-printable filenames.
 
 ## Where the code lives
 
@@ -66,20 +94,24 @@ src/sn2md_worker/
 ├── __main__.py         entrypoint + startup sequencing
 ├── app.py              FastAPI factory
 ├── config.py           Settings (pydantic-settings) + singleton
-├── db.py               engine + datasource singletons, sql_session()
+├── db.py               engine + datasource singletons, sql_session(),
+│                       global SQLite connect listener (WAL + 30s busy_timeout)
 ├── logging.py          structlog + stdlib JSON setup
 ├── observability.py    /healthz /readyz /status
-├── drive/              DriveClient, models, path resolver, webhook route
-├── conversion/         paths (logical_key etc) + per-page runner (multi_page.py)
-├── state/              SQLAlchemy models + per-table repos
-└── workflows/          DBOS workflows (see nested CLAUDE.md)
+├── drive/              DriveClient (retry-wrapped via tenacity), models,
+│                       path resolver, webhook route
+├── conversion/         paths + per-page runner (multi_page.py)
+├── state/              SQLAlchemy models + per-table repos returning
+│                       frozen `*View` dataclasses (detached-instance safe)
+└── workflows/          DBOS workflows (see nested CLAUDE.md);
+                        `queues.py` is a leaf module holding queue-name constants
 ```
 
 ## Common commands
 
 ```sh
 uv sync                      # install deps + local package
-uv run pytest                # 111 tests
+uv run pytest                # 206 tests
 uv run ruff check src tests scripts
 uv run ruff format src tests scripts
 uv run mypy src
@@ -128,8 +160,10 @@ Some are user preferences saved to memory; some are project-specific:
 - `debounce_file` workflow — schema exists (`debounce_state` table +
   repo) but the workflow isn't built. Drive push notifications appear
   to only fire on completed uploads.
-- Fallback `poll_changes` cron — startup `backfill` covers "worker was
-  down" and Drive push has been reliable in testing.
+- Fallback `poll_changes` cron — startup `backfill` + the cursor-expired
+  fallback in `poll_changes` (resets cursor via `get_start_page_token`
+  and enqueues a fresh `backfill`) + `ensure_active_channel`'s
+  recovery poll on boot together cover the "worker was down" case.
 - Hash-first page cache (v1 keys on `(logical_key, page_index)` — a
   page inserted mid-note re-runs downstream pages through Gemini).
   Fixable with hash-first matching if it becomes painful.

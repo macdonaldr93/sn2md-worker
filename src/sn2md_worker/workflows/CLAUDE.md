@@ -96,15 +96,33 @@ Schedule (registered by `workflows.register_schedules()`):
 
 Called from `__main__.py` in order after `DBOS.launch()`:
 
-1. `register_queues()` — creates the two DBOS queues.
-2. `register_schedules()` — installs the daily cron.
+1. `register_queues()` — creates the three DBOS queues.
+2. `register_schedules()` — installs the daily cron; pre-checks via
+   `DBOS.get_schedule` before calling `create_schedule` so a re-boot
+   on the same DB is a no-op instead of raising.
 3. `seed_cursor_if_ready(drive)` — writes an initial `drive_change_cursor`
    row from `get_start_page_token()` if none exists (dev-friendly:
    skips if DriveClient isn't available).
 4. `ensure_active_channel_if_ready(drive, settings)` — delegates to
    `renew_watch_channel_impl` with `trigger_source="startup"` so the
-   first channel is created without waiting for the cron.
+   first channel is created without waiting for the cron. Also
+   enqueues a `poll_changes("recovery")` if the previously-active
+   channel expired while we were down.
 5. `enqueue_startup_backfill()` — enqueues `backfill` on `poll_queue`.
+
+## Recovery behaviors worth naming
+
+- **Cursor expired** (Drive 4xx on `changes.list`): `poll_changes`
+  catches `DrivePermanentError`, resets the cursor via
+  `get_start_page_token`, and enqueues `backfill` so nothing is lost.
+- **Missed create-side push after `delete_output._repoint`**:
+  `delete_output` enqueues `convert_note(live.id, source_path)` after
+  repointing, so even if `poll_changes` never saw the replacement, the
+  vault stays fresh.
+- **Renewal safety**: `renew_watch_channel` uses a two-phase pending
+  row — insert BEFORE the Drive call, `confirm` after — so a crash
+  mid-renewal doesn't drop notifications. `RENEWAL_HEADROOM = 48h`
+  gives the daily cron a two-day cushion.
 
 ## Deferred workflows
 

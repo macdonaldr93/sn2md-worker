@@ -61,7 +61,7 @@ git clone https://github.com/macdonaldr93/sn2md-worker.git
 cd sn2md-worker
 
 uv sync                        # installs deps + the local package into .venv
-uv run pytest                  # 111 tests, in-memory SQLite, no network
+uv run pytest                  # 206 tests, in-memory SQLite, no network
 uv run pre-commit install      # ruff + mypy + hygiene on every commit
 ```
 

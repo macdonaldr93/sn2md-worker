@@ -30,10 +30,10 @@ able to start coding from here without re-litigating decisions.
     │  DBOS runtime (single SQLite file: workflow state  │
     │    + app tables via SQLAlchemyDatasource)          │
     │   ├── scheduled: renew_watch_channel (daily 06:00) │
-    │   ├── enqueued : poll_changes  (poll_queue,  c=1)  │
+    │   ├── enqueued : poll_changes  (poll_queue,   c=1) │
     │   ├── enqueued : convert_note  (convert_queue,c=2) │
-    │   ├── enqueued : delete_output (convert_queue,c=2) │
-    │   └── enqueued : backfill      (poll_queue, once)  │
+    │   ├── enqueued : delete_output (delete_queue, c=2) │
+    │   └── enqueued : backfill      (poll_queue,  once) │
     │                                                    │
     │  sn2md library + llm + llm-gemini                  │
     │            │                                       │
@@ -96,11 +96,12 @@ sn2md-worker/
 │       ├── poll_changes.py         # walks changes.list, dispatches per change
 │       └── renew_watch.py          # scheduled channel renewal
 ├── tests/
-│   └── unit/                       # BDD scenario classes, 90 tests total
-│       ├── conversion/             # test_paths, test_runner
-│       ├── drive/                  # test_models, test_paths, test_webhook
-│       ├── state/                  # test_conversions, test_watch_channels, test_cursor, test_debounce, test_schema
-│       ├── workflows/              # test_convert_note, test_poll_changes, test_delete_output, test_backfill, test_renew_watch
+│   └── unit/                       # BDD scenario classes, 206 tests total
+│       ├── conversion/             # test_paths, test_multi_page
+│       ├── drive/                  # test_client, test_models, test_paths, test_webhook
+│       ├── state/                  # test_conversions, test_watch_channels, test_cursor, test_debounce, test_schema, test_page_conversions
+│       ├── workflows/              # test_convert_note, test_poll_changes, test_delete_output, test_backfill, test_renew_watch, test_registration
+│       ├── test_main.py
 │       └── test_observability.py
 ├── scripts/verify/                 # M0 gate scripts (Drive access, sn2md-Gemini)
 ├── docker/
@@ -182,17 +183,18 @@ def upsert_conversion(...) -> None:
 ```
 
 Application tables managed via SQLAlchemy declarative models. **No
-migration framework**. `Base.metadata.create_all` runs on startup, and
-`state/schema.py::_apply_micro_migrations` handles targeted
-`ALTER TABLE ADD COLUMN` for existing installs on the tiny set of
-column additions we've needed — check the code before adding a fifth
-one and consider whether Alembic finally earns its keep.
-
-For anything more invasive than a nullable column addition (renames,
-type changes, non-null defaults), the recovery path is nuking the
-SQLite file and letting the `backfill` workflow re-populate
+migration framework, no in-place migrations.** `Base.metadata.create_all`
+runs on startup and that's it — any schema change (column add, index,
+constraint) applies on the next fresh boot. Recovery path for any
+break is nuking the SQLite file and letting `backfill` re-populate
 `conversion_records` from Drive. Acceptable because Drive is source of
-truth and the vault also lives in Obsidian Sync.
+truth and the vault also lives in Obsidian Sync. Revisit Alembic if
+we ever grow multiple deploys or state we can't rebuild from Drive.
+
+`drive_watch_channels` has a partial unique index enforcing "at most
+one row where `is_active = 1`" at the DB level; `drive_change_cursor`
+has a `CHECK (id = 1)` constraint. Both are belt-and-suspenders on top
+of the code that manages them.
 
 **`conversion_records`** — one row per **logical** `.note` (Drive path +
 name), because Supernote sync replaces the file rather than updating in
@@ -264,14 +266,24 @@ plain `<name>_impl(...)` function — the impl takes injected dependencies
 All impls follow the same log discipline: `_started`, `_succeeded` /
 `_failed` / `_skipped(reason=…)` — see §14.
 
-Queues (registered after `DBOS.launch()`):
+Queues (registered after `DBOS.launch()`, names in
+`workflows/queues.py`):
 - `convert_queue` — `worker_concurrency=settings.queue.convert_concurrency`
-  (default 2). Serves `convert_note` and `delete_output`.
+  (default 2). Serves `convert_note` only.
+- `delete_queue` — `worker_concurrency=2`. Serves `delete_output` on its
+  own queue so long conversions don't stall stale-delete cleanup.
 - `poll_queue` — `worker_concurrency=1`. Serves `poll_changes` and
   `backfill`.
 
-Schedule (registered after `DBOS.launch()`):
+Schedule (registered after `DBOS.launch()`; the register step
+pre-checks via `DBOS.get_schedule` so re-boots on the same DB are a
+no-op):
 - `renew-watch-channel` — cron `0 6 * * *` (daily 06:00 UTC).
+
+`convert_note` acquires a `filelock.FileLock` keyed on a SHA-256 of
+`logical_key` (lockfiles under `/tmp/sn2md-worker-locks/`) before
+touching the vault — a per-key mutex that serializes concurrent
+conversions of the same note across workers.
 
 ### 5.1 `renew_watch_channel` — scheduled daily
 
@@ -294,18 +306,26 @@ holds:
 - Active channel's `webhook_url` doesn't match `settings.webhook.url`
   → `drive.stop_channel(...)` best-effort on the old one, then create.
   This is the "ngrok URL changed" story — just edit `.env`, restart.
-- Active channel's `expires_at - now` ≤ `RENEWAL_HEADROOM` (24h) → renew.
+- Active channel's `expires_at - now` ≤ `RENEWAL_HEADROOM` (48h) → renew.
 
-Otherwise skip with `reason="still_fresh"`. On a decision to renew, it
-fetches the current cursor (or seeds one via `get_start_page_token`),
-generates a random channel id + token, calls `drive.watch_changes(...)`
-with `ttl_seconds = settings.drive.watch_channel_ttl_days * 86_400`,
-persists the new channel with the current `settings.webhook.url`, and
-marks it active.
+Otherwise skip with `reason="still_fresh"`. On a decision to renew,
+it's a **two-phase** flow to survive a crash between Drive and the DB
+write:
+1. Insert a *pending* row (channel_id + token + placeholder
+   `resource_id=""`, placeholder `expires_at=now`) BEFORE calling
+   Drive. If we crash after Drive succeeds but before we commit the
+   real values, the pending row still lets incoming webhook pushes
+   authenticate.
+2. Call `drive.watch_changes(...)` — we don't pass `expiration`, so
+   Drive picks its own max (avoids host-clock skew).
+3. On success: `confirm` the row with Drive's real `resource_id` and
+   `expires_at`, then `mark_active`. On failure: `delete_by_id` rolls
+   the pending row back.
 
 Startup helper `ensure_active_channel(drive, settings)` delegates to
-the same impl with `trigger_source="startup"` — seeds the first channel
-without waiting for the cron.
+the same impl with `trigger_source="startup"` and additionally enqueues
+`poll_changes("recovery")` if the previously-active channel expired
+while we were down.
 
 ### 5.2 `poll_changes` — enqueued by the webhook
 
@@ -319,20 +339,32 @@ def poll_changes(trigger_source: str) -> None:
 `get_start_page_token` if missing), walks `changes.list` pages, and
 dispatches each change:
 
-- Removed → `DBOS.enqueue_workflow(CONVERT_QUEUE_NAME, delete_output, file_id)`
+- Removed → `enqueue_workflow(DELETE_QUEUE_NAME, delete_output, file_id)`
 - Trashed → same as removed
-- `.note` in the source-folder subtree → `DBOS.enqueue_workflow(CONVERT_QUEUE_NAME, convert_note, file_id, source_path)`
+- `.note` in the source-folder subtree →
+  `enqueue_workflow(CONVERT_QUEUE_NAME, convert_note, file_id, source_path)`
 - Anything else → ignored
 
-Cursor is saved after the last page. Enqueues happen before the save so
-a crash mid-poll re-enqueues on retry (safe because both target
-workflows are idempotent).
+**Cursor advances per page**, not once at the end — a crash mid-multi-
+page walk resumes at the next unprocessed page. `resolve_source_path`
+memoizes `drive.get_metadata` lookups for the duration of one
+`poll_changes_impl` run, so sibling changes sharing ancestors don't
+each pay the full ancestor walk.
 
-**No fallback poll cron.** The tech brief originally called for a
-5-minute scheduled `poll_changes`; we deferred it. Startup backfill
-covers the "worker was down" case, and Google Drive push has been
-reliable enough in testing that a periodic re-poll hasn't been
-necessary. Add if we observe misses.
+**Per-change exception handling**: catches `DrivePermanentError`
+(4xx-except-429) — the file is gone / rejected, log-skip and continue.
+`DriveTransientError` (5xx after retries, network) and any other
+exception propagate to stall the workflow so DBOS retries from the
+last-saved cursor.
+
+**Cursor-expired fallback**: if `drive.changes_list` itself raises
+`DrivePermanentError` (persisted cursor older than Drive's change-log
+window), we reset via `get_start_page_token`, enqueue `backfill`, and
+return cleanly.
+
+**No fallback poll cron.** Startup backfill + the cursor-expired
+fallback + `ensure_active_channel`'s recovery poll on boot together
+cover the "worker was down" case.
 
 ### 5.3 `debounce_file` — DEFERRED
 
@@ -343,7 +375,7 @@ enqueued `convert_note` directly from `poll_changes` without seeing bad
 conversions in practice. Revisit if we observe partial-file
 conversions.
 
-### 5.4 `convert_note` — per-file, `convert_queue`
+### 5.4 `convert_note` — per-file, `convert_queue` (filelock-serialized)
 
 ```python
 @DBOS.workflow()
@@ -355,25 +387,35 @@ def convert_note(file_id: str, source_path: str) -> None:
 ```
 
 `convert_note_impl` flow:
-1. Compute `logical_key(source_path)`.
-2. `drive.get_metadata(file_id)` — early return if trashed.
-3. Idempotency check: if `conversion_records[logical_key]` has matching
+1. Compute `logical_key(source_path)` — raises `UnsafePathError` on
+   `..`, NUL, empty segments, or Windows-reserved names, which is
+   log-skipped (DBOS won't retry).
+2. Acquire a per-key `FileLock` (SHA-256 of `logical_key`, lockfile
+   under `/tmp/sn2md-worker-locks/`) — serializes concurrent
+   conversions of the same note.
+3. `drive.get_metadata(file_id)` — early return if trashed.
+4. Idempotency check: if `conversion_records[logical_key]` has matching
    `source_md5`, `SUCCESS` status, and same `current_file_id`, skip.
-4. Load per-page state: `page_conversions.list_for_note(session, key)` →
+5. Load per-page state: `page_conversions.list_for_note(session, key)` →
    `{page_index: page_md5}` dict.
-5. `drive.download(file_id, tmp_dir, name)` → local path.
-6. `note_output_dir(source_path, vault_root)` gives the per-note vault
+6. `drive.download(file_id, tmp_dir, name)` → chunked
+   `MediaIoBaseDownload` streaming; retried at whole-download level via
+   tenacity.
+7. `note_output_dir(source_path, vault_root)` gives the per-note vault
    folder (`<vault>/<parents>/<basename>/`).
-7. `run_multi_page(...)` — extracts PNGs, hashes each, calls Gemini only
-   for pages whose hash doesn't match the cache. Writes `page-NN.md` +
-   `page-NN.png` per page and an `index.md`. See §6.
-8. Upsert `conversion_records` with new md5, `parent_folder_id`, output
+8. `run_multi_page(...)` — extracts PNGs (sorted numerically by the
+   first int in each filename), reads each PNG into memory once
+   (hash+copy in a single pass), calls Gemini via tenacity-wrapped
+   retry only for pages whose hash doesn't match the cache. Writes
+   `page-NN.md` + `page-NN.png` per page and an `index.md`. See §6.
+9. Upsert `conversion_records` with new md5, `parent_folder_id`, output
    path, and `SUCCESS`. Upsert one `page_conversions` row per current
    page. Delete `page_conversions` rows for indexes ≥ current page
    count (pages removed from the note).
-9. Sweep the note folder: remove stale `page-NN.md` / `page-NN.png` for
-   dropped pages and the legacy flat `<basename>.md` /
-   `.sn2md.metadata.yaml` from pre-multi-page installs.
+10. Sweep the note folder: remove stale `page-NN.md` / `page-NN.png`
+    for dropped pages (both `.md` and PNG-only orphans) plus the
+    legacy flat `<basename>.md` / `.sn2md.metadata.yaml` from
+    pre-multi-page installs.
 
 Any uncaught exception is logged as `convert_note_failed` (with
 traceback) and re-raised so DBOS records the workflow as ERROR.
@@ -391,9 +433,12 @@ def delete_output(file_id: str) -> None:
 1. Look up `conversion_records` by `current_file_id`. No record → no-op.
 2. If the record has a `parent_folder_id`, call
    `drive.find_live_note(parent_folder_id, source_name)`. If a live
-   file with the same name exists at that location with a different id,
-   **re-point** `current_file_id` to it (the newer Supernote-side
-   upload) and skip the vault delete.
+   file with the same name exists at that location with a different
+   id, **re-point** `current_file_id` to it (the newer Supernote-side
+   upload) via `conversions.set_current_file_id`, **enqueue a
+   follow-up `convert_note(live.id, source_path)`** on
+   `CONVERT_QUEUE_NAME` (in case `poll_changes` never saw the
+   create-side push), and skip the vault delete.
 3. Otherwise: `_delete_from_vault(output_rel_path, vault_root)` — a
    guarded `shutil.rmtree` that refuses empty paths, paths that resolve
    outside `vault_root`, or `vault_root` itself.
@@ -401,6 +446,9 @@ def delete_output(file_id: str) -> None:
 
 The `find_live_note` lookup is a single `files.list` call with
 `q="name = '<x>' and trashed = false and '<parent_folder_id>' in parents"`.
+Names containing non-printable characters (`str.isprintable() == False`)
+are refused before the query — Google's query language quotes with `'`
+and control chars could inject.
 
 ### 5.6 `backfill` — startup one-shot, `poll_queue`
 
@@ -412,14 +460,15 @@ def backfill() -> None:
 
 Iterates `drive.list_all_notes(source_folder_id)` which depth-first
 walks the source folder tree and yields `(FileMetadata, source_path)`
-for every `.note`. For each: if `conversion_records` has no matching
+for every `.note`. **All conversion records are loaded once up front**
+via `conversions.list_all_by_key(session)` — the per-file check is a
+Python dict lookup, not another SQLite hit. For each: if no matching
 `logical_key`, or the stored md5 differs, or `last_status != SUCCESS`,
-enqueue `convert_note`. Enqueue-only — the actual conversion happens
-via `convert_queue`.
+enqueue `convert_note`.
 
-Enqueued once at startup via `workflows.enqueue_startup_backfill()`
-after `DBOS.launch()` and only if a `DriveClient` was successfully
-initialized.
+Enqueued at startup via `workflows.enqueue_startup_backfill()` (only if
+a `DriveClient` was successfully initialized), and re-enqueued by
+`poll_changes` when the persisted cursor is rejected as expired.
 
 ## 6. sn2md integration
 
@@ -488,22 +537,40 @@ Wraps `googleapiclient.discovery.build("drive", "v3", ...)` with a service
 account credential. Scope: `https://www.googleapis.com/auth/drive.readonly`
 (we never write to Drive).
 
+**Retry + error taxonomy**. All `.execute()` calls are routed through
+`_call` → `_invoke_with_drive_retry` (tenacity, 3 attempts, exponential
+backoff with jitter, retries 429/5xx + `ServerNotFoundError`/`SSLError`/
+`TimeoutError`/`ConnectionError`). Terminal errors are classified by
+`_drive_error_from_http`:
+- `DrivePermanentError` — 4xx except 429 (retry exhausted for 429
+  counts as transient). Callers can log-skip.
+- `DriveTransientError` — 5xx after retries + all transport errors.
+  Callers let it propagate so DBOS retries.
+- Both subclass `DriveClientError` for backwards-compatible catches.
+
 Public methods on `DriveClient`:
 - `get_metadata(file_id, fields=DEFAULT_FILE_FIELDS) → FileMetadata`
 - `get_start_page_token() → str`
-- `download(file_id, dest_dir, name) → Path` — writes bytes to `dest_dir/name`
+- `download(file_id, dest_dir, name) → Path` — chunked stream via
+  `MediaIoBaseDownload` (4 MB chunks); truncate-and-restart on retry.
 - `list_all_notes(folder_id) → Iterator[(FileMetadata, source_path)]` —
-  depth-first walk; yields each `.note` with its POSIX path relative to
-  `folder_id`
+  depth-first walk; per-folder listing dedupes file ids across pages
+  (Drive can return the same id twice under concurrent edits).
 - `find_live_note(parent_folder_id, name) → FileMetadata | None` — scoped
-  `files.list` with `q="name = '<x>' and trashed = false and '<pid>' in parents"`
-- `watch_changes(webhook_url, channel_id, token, start_page_token, ttl_seconds) → ChannelInfo`
+  `files.list` with `q="name = '<x>' and trashed = false and '<pid>' in parents"`.
+  Refuses non-printable names (`str.isprintable()`).
+- `watch_changes(webhook_url, channel_id, token, start_page_token) → ChannelInfo` —
+  no `expiration` in the request, so Drive picks its own max TTL.
+- `stop_channel(channel_id, resource_id)` — swallows 404 (channel
+  already gone); other errors surface via `_drive_error_from_http`.
 - `changes_list(page_token, ...) → ChangesPage`
 
 Path resolution moved out of `DriveClient`: `drive/paths.py` exposes a
 pure `resolve_source_path(file_id, root_folder_id, get_metadata) → str | None`
-that walks the parent chain (max depth 100). `poll_changes` binds
-`drive.get_metadata` as the callable.
+that walks *every* parent chain (multi-parent legacy files fall back
+past a stray parent that dead-ends), max depth 100. `poll_changes`
+memoizes `drive.get_metadata` for the duration of one run and passes
+the memoized callable in.
 
 Changes-list defaults:
 - `restrictToMyDrive=false`
@@ -520,14 +587,20 @@ Headers of interest:
   X-Goog-Resource-Id, X-Goog-Resource-State, X-Goog-Message-Number
 ```
 
+Route is `def` (not `async def`) so FastAPI runs it in its threadpool
+— the body does blocking SQLA + DBOS work.
+
 Handler:
 1. Return 200 immediately for `X-Goog-Resource-State: sync` (initial
    handshake).
-2. Look up channel by `X-Goog-Channel-Id`; if unknown, return 200 and log
-   (a stale channel we haven't cleaned up).
-3. Verify `X-Goog-Channel-Token` matches persisted token; else 200 + warn.
-4. Enqueue `poll_changes(trigger_source="webhook")` if not already
-   running/pending. Return 200.
+2. Look up channel by `X-Goog-Channel-Id`; if unknown OR the channel's
+   `expires_at` is in the past, return 200 and log (a stale channel).
+3. Verify `X-Goog-Channel-Token` matches persisted token via
+   `hmac.compare_digest` (constant-time); else 200 + warn.
+4. Enqueue `poll_changes(trigger_source="webhook")` with
+   `SetEnqueueOptions(deduplication_id=f"{channel_id}:{message_number}")`
+   so Google's push retries (same message number) are dropped by DBOS
+   with `DBOSQueueDeduplicatedError`, which we absorb as 200.
 
 Response codes: return 200 quickly; DBOS handles the actual work
 asynchronously. Google retries on 5xx with exponential backoff — we do
@@ -538,9 +611,8 @@ not want to leverage that (we have our own poller for catch-up).
 See [`config.example.toml`](../config.example.toml) for the canonical
 layout. Sections:
 
-- `[drive]` — `source_folder_id`, `watch_channel_ttl_days` (max 7),
-  debounce timing knobs (currently unused; kept for the deferred
-  workflow)
+- `[drive]` — `source_folder_id`, debounce timing knobs (currently
+  unused; kept for the deferred `debounce_file` workflow)
 - `[vault]` — `root_path`, `mirror_source_layout`
 - `[sn2md]` — `model` (default `gemini/gemini-2.5-pro`), `api_key`
   (SecretStr, optional). `workflows.convert_note._resolve_gemini_key`
@@ -579,9 +651,12 @@ Canonical files:
   ENTRYPOINT drops to `app` after PUID/PGID reshape.
 - [`docker/entrypoint.sh`](../docker/entrypoint.sh) — linuxserver-style:
   reads `PUID` / `PGID` / `TZ` / `UMASK` at startup, `usermod -o`
-  reshapes `app`, symlinks `/etc/localtime`, chowns `/data` `/vault`
-  `/app/.venv` (skip with `CHOWN_ON_START=false`), then
-  `exec gosu app:app "$@"`.
+  reshapes `app`, symlinks `/etc/localtime`, chowns `/data` and
+  `/vault` (`/app/.venv` is already `app`-owned from the build; skip
+  the whole step with `CHOWN_ON_START=false`), then
+  `exec gosu app:app "$@"`. Errors are surfaced under `set -euo
+  pipefail` instead of swallowed — a read-only mount or full disk
+  fails the boot loudly.
 - [`docker-compose.yml`](../docker-compose.yml) — reference compose for
   local dev / single-host deployments with env-driven volume paths.
 - [`.env.example`](../.env.example) — required env vars and
@@ -744,7 +819,7 @@ originating `request_id` is a future addition.
 
 ## 15. Testing strategy
 
-**111 unit tests**, in-memory SQLite. All tests live under
+**206 unit tests**, in-memory SQLite. All tests live under
 `tests/unit/` mirroring the source layout (per-project convention).
 Two shapes:
 
@@ -812,3 +887,36 @@ Drive + Gemini is via `scripts/verify/`.
   (webhook → poll_changes worker → convert_note worker). Today those
   cross with `file_id` / `logical_key`, not with the originating
   `request_id`.
+
+### Hardening shipped in the audit pass (2026-07-05)
+
+Load-bearing subsystems worth naming; each one has its own tests:
+
+- **SQLite tuning**: global `event.listens_for(Engine, "connect")` in
+  `db.py` sets WAL / `busy_timeout=30000` / `synchronous=NORMAL` /
+  foreign_keys on every SQLite connection in the process (ours + DBOS's).
+  `_dbos_config` forwards `check_same_thread=False` + `timeout=30` to
+  DBOS's `db_engine_kwargs` so its internal engines are threadpool-safe.
+- **Atomic upserts**: every write in `state/*` is a single SQLite
+  `INSERT ... ON CONFLICT DO UPDATE` — no get-then-set race.
+- **Per-key filelock**: `convert_note` acquires a `filelock.FileLock`
+  keyed on a SHA-256 of `logical_key` (lockfiles under
+  `/tmp/sn2md-worker-locks/`) so concurrent conversions of the same
+  note serialize cleanly across workers.
+- **Retry taxonomy**: `DrivePermanentError` vs `DriveTransientError`
+  (see §7). Gemini calls in `conversion/multi_page` also retry via
+  tenacity.
+- **View dataclasses**: state repos return frozen `<Entity>View`
+  dataclasses instead of ORM objects — callers can hold them past
+  session close without any `DetachedInstanceError` risk.
+- **Path safety**: `conversion/paths` rejects `..`, NUL, empty
+  segments, and Windows-reserved names before anything reaches the
+  vault. `find_live_note` refuses non-printable filenames.
+- **Cursor recovery**: `poll_changes` catches `DrivePermanentError` on
+  `changes.list`, resets the cursor via `get_start_page_token`, and
+  enqueues a fresh `backfill`. `ensure_active_channel` on boot also
+  enqueues a recovery poll if the previously-active channel expired
+  during downtime.
+- **DB-level singletons**: partial unique index on
+  `drive_watch_channels(is_active) WHERE is_active = 1` and a
+  `CHECK (id = 1)` on `drive_change_cursor`.
