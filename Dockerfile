@@ -6,6 +6,7 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/app/.venv \
+    UV_COMPILE_BYTECODE=1 \
     PATH="/app/.venv/bin:${PATH}" \
     PUID=1000 \
     PGID=1000 \
@@ -15,48 +16,43 @@ ENV PYTHONUNBUFFERED=1 \
     SN2MD_WORKER__VAULT__ROOT_PATH="/vault" \
     SN2MD_WORKER__GOOGLE__APPLICATION_CREDENTIALS="/secrets/service-account.json"
 
-# System deps:
-#   - gosu — drop from root to `app` at container start
-#   - tzdata — resolve TZ env var to /etc/localtime
-# uv installs into system Python.
-RUN apt-get update \
+# gosu drops root → `app` at container start; tzdata resolves TZ.
+# Removing docker-clean lets the apt cache mount actually populate.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+ && apt-get update \
  && apt-get install -y --no-install-recommends gosu tzdata \
- && rm -rf /var/lib/apt/lists/* \
- && pip install --no-cache-dir uv \
  && useradd --create-home --uid 1000 --home-dir /home/app app \
  && mkdir -p /app /data /vault /secrets \
- && chown -R app:app /app /data /vault
+ && chown -R app:app /app /data /vault /home/app
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 
 WORKDIR /app
 
-# Metadata + sources copied before install so uv can build the local package.
+# Split the sync in two so source edits skip the wheel-install layer:
+# metadata → deps-only sync → src/ → project-only sync.
 COPY --chown=app:app pyproject.toml uv.lock README.md ./
+RUN --mount=type=cache,target=/home/app/.cache/uv,uid=1000,gid=1000 \
+    gosu app:app uv sync --frozen --no-dev --no-install-project
+
 COPY --chown=app:app src/ src/
-COPY --chown=app:app config.example.toml ./
+RUN --mount=type=cache,target=/home/app/.cache/uv,uid=1000,gid=1000 \
+    gosu app:app uv sync --frozen --no-dev
 
-# Install deps + the local package as `app` — venv lands owned by `app` so
-# the runtime user can invoke `uv run` without further chown.
-RUN gosu app:app uv sync --frozen --no-dev
-
-# Entrypoint script handles PUID/PGID/TZ/UMASK linuxserver-style, then execs
-# the CMD as `app`. Kept under docker/ so the source is easy to review.
 COPY docker/entrypoint.sh /usr/local/bin/sn2md-entrypoint
 RUN chmod +x /usr/local/bin/sn2md-entrypoint
 
 EXPOSE 8080
 
-# `timeout=3` on the urlopen means Docker's 5s HEALTHCHECK timeout has
-# headroom to see a non-200 response even against a slow/hung app. Without
-# it, `urlopen` has no default timeout and can leave a socket dangling
-# until Docker kills the whole process — repeated over retries that's a
-# slow leak.
+# `timeout=3` on urlopen — without it the socket can hang past Docker's
+# 5s HEALTHCHECK timeout and leak until the process is killed.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD python -c "import sys, urllib.request as u; sys.exit(0 if u.urlopen('http://localhost:8080/healthz', timeout=3).status == 200 else 1)"
 
-# ENTRYPOINT runs as root, does the PUID/PGID switch, then drops to `app`
-# to exec the CMD. Invoke python from the pre-built venv directly so `uv
-# run` doesn't try to reconcile the environment at every start (which
-# would pull dev deps back in). The CMD must stay single-process — DBOS +
-# SQLite state lives in-process and per-worker singletons would race.
+# Invoke python directly from the venv — `uv run` would re-sync at every
+# start and pull dev deps. CMD must stay single-process: DBOS + SQLite
+# state is in-process and multi-worker would race the singletons.
 ENTRYPOINT ["/usr/local/bin/sn2md-entrypoint"]
 CMD ["/app/.venv/bin/python", "-m", "sn2md_worker"]

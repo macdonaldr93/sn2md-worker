@@ -17,6 +17,7 @@ from sn2md_worker.config import (
     set_settings,
 )
 from sn2md_worker.db import set_engine
+from sn2md_worker.startup_status import StartupStatus, set_startup_status
 from sn2md_worker.state import conversions, cursor, watch_channels
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
@@ -236,9 +237,41 @@ class TestStatusEndpoint:
         body = response.json()
         assert [c["logical_key"] for c in body["recent_conversions"]] == ["Notebooks/success.note"]
         assert [c["last_error"] for c in body["recent_failures"]] == ["gemini timeout"]
+        assert body["recent_pending"] == []
         assert body["watch_channel"]["channel_id"] == "chan-1"
         assert body["watch_channel"]["is_active"] is True
         assert body["change_cursor"]["page_token"] == "42"
+
+    def test_surfaces_pending_conversions_so_in_flight_and_stuck_notes_are_visible(
+        self, engine: Engine
+    ) -> None:
+        # GIVEN — a PENDING record (mid-conversion or crashed mid-note).
+        set_settings(_settings())
+        with Session(engine) as session, session.begin():
+            conversions.upsert(
+                session,
+                ConversionUpsert(
+                    logical_key="Notebooks/pending.note",
+                    current_file_id="pen-1",
+                    parent_folder_id="p1",
+                    source_name="pending.note",
+                    source_path="Notebooks/pending.note",
+                    source_md5="md5-pending",
+                    output_rel_path="Notebooks/pending",
+                    last_converted_at=NOW,
+                    status=ConversionStatus.PENDING,
+                ),
+            )
+
+        client = TestClient(create_app())
+
+        # WHEN
+        body = client.get("/status").json()
+
+        # THEN — surfaced in its own bucket, not in success/error buckets.
+        assert [c["logical_key"] for c in body["recent_pending"]] == ["Notebooks/pending.note"]
+        assert body["recent_conversions"] == []
+        assert body["recent_failures"] == []
 
     def test_reports_correct_queue_depth_when_workflow_status_rows_exist(
         self, engine: Engine
@@ -311,3 +344,53 @@ class TestStatusEndpoint:
 
         # THEN
         assert response.status_code == 404
+
+    def test_startup_defaults_to_all_deferred_when_none_recorded(
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # GIVEN — no startup status has been set (test bypasses __main__.py).
+        # Force the singleton back to None in case another test recorded one.
+        monkeypatch.setattr("sn2md_worker.startup_status._Holder.status", None)
+        set_settings(_settings())
+        client = TestClient(create_app())
+
+        # WHEN
+        body = client.get("/status").json()
+
+        # THEN — every field is "deferred", no error
+        assert body["startup"] == {
+            "drive_client": "deferred",
+            "seed_cursor": "deferred",
+            "ensure_channel": "deferred",
+            "backfill_enqueue": "deferred",
+            "last_error": None,
+        }
+
+    def test_startup_reports_recorded_step_outcomes(
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # GIVEN — a startup where DriveClient came up but seeding cursor failed
+        monkeypatch.setattr("sn2md_worker.startup_status._Holder.status", None)
+        set_startup_status(
+            StartupStatus(
+                drive_client="ok",
+                seed_cursor="failed",
+                ensure_channel="ok",
+                backfill_enqueue="ok",
+                last_error="seed_cursor: Drive transport failure",
+            )
+        )
+        set_settings(_settings())
+        client = TestClient(create_app())
+
+        # WHEN
+        body = client.get("/status").json()
+
+        # THEN — outcomes surface faithfully
+        assert body["startup"] == {
+            "drive_client": "ok",
+            "seed_cursor": "failed",
+            "ensure_channel": "ok",
+            "backfill_enqueue": "ok",
+            "last_error": "seed_cursor: Drive transport failure",
+        }

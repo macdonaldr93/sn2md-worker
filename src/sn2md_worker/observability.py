@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from sn2md_worker.config import get_settings
 from sn2md_worker.db import sql_session
+from sn2md_worker.startup_status import StepStatus, get_startup_status
 from sn2md_worker.state import conversions, cursor, watch_channels
 from sn2md_worker.state.conversions import ConversionRecordView
 from sn2md_worker.state.cursor import CursorView
@@ -68,13 +69,36 @@ class BackfillStatus(BaseModel):
     error: str | None
 
 
+class StartupSnapshot(BaseModel):
+    """Outcome of each boot-time init step.
+
+    Each field is `"ok"` | `"deferred"` | `"failed"`. `deferred` means
+    the step was intentionally skipped (typically because DriveClient
+    isn't configured — the dev-mode path). `failed` means the step
+    tried and errored; grep the container logs for `boot_step_failed`
+    or `drive_client_init_failed` for the traceback. When no startup
+    has been recorded yet (early boot, tests without the full
+    entrypoint), every field is `"deferred"` and `last_error` is
+    `null`.
+    """
+
+    drive_client: StepStatus = "deferred"
+    seed_cursor: StepStatus = "deferred"
+    ensure_channel: StepStatus = "deferred"
+    backfill_enqueue: StepStatus = "deferred"
+    last_error: str | None = None
+
+
 class StatusResponse(BaseModel):
     recent_conversions: list[ConversionSummary]
     recent_failures: list[ConversionSummary]
+    # In-flight + crash-stuck converts (row lingering here = didn't finish).
+    recent_pending: list[ConversionSummary]
     watch_channel: WatchChannelSummary
     change_cursor: CursorSummary
     queue_depth: QueueDepth
     backfill: BackfillStatus
+    startup: StartupSnapshot
 
 
 router = APIRouter(tags=["observability"])
@@ -136,6 +160,9 @@ async def get_status() -> StatusResponse:
         recent_error = conversions.list_recent_by_status(
             session, status=ConversionStatus.ERROR, limit=20
         )
+        recent_pending = conversions.list_recent_by_status(
+            session, status=ConversionStatus.PENDING, limit=20
+        )
         active_channel = watch_channels.get_active(session)
         change_cursor = cursor.get(session)
         queue_depth = _query_queue_depth(session)
@@ -144,10 +171,26 @@ async def get_status() -> StatusResponse:
     return StatusResponse(
         recent_conversions=[_to_summary(record) for record in recent_success],
         recent_failures=[_to_summary(record) for record in recent_error],
+        recent_pending=[_to_summary(record) for record in recent_pending],
         watch_channel=_channel_summary(active_channel),
         change_cursor=_cursor_summary(change_cursor),
         queue_depth=queue_depth,
         backfill=backfill,
+        startup=_startup_snapshot(),
+    )
+
+
+def _startup_snapshot() -> StartupSnapshot:
+    """Render the process-wide StartupStatus, or a fully-deferred default."""
+    status = get_startup_status()
+    if status is None:
+        return StartupSnapshot()
+    return StartupSnapshot(
+        drive_client=status.drive_client,
+        seed_cursor=status.seed_cursor,
+        ensure_channel=status.ensure_channel,
+        backfill_enqueue=status.backfill_enqueue,
+        last_error=status.last_error,
     )
 
 

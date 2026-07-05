@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import ssl
+import threading
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import google_auth_httplib2
+import httplib2
+from google.auth.exceptions import GoogleAuthError
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseDownload
+from googleapiclient.http import HttpRequest, MediaIoBaseDownload
 from httplib2 import ServerNotFoundError
 from tenacity import (
     RetryCallState,
@@ -200,10 +204,32 @@ class DriveClient:
         if not credentials_path.is_file():
             raise DriveClientError(f"credentials file not found: {credentials_path}")
 
-        credentials = service_account.Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
-            str(credentials_path), scopes=list(scopes)
+        # google-auth raises MalformedError (subclass of GoogleAuthError)
+        # for missing fields, ValueError for JSON parse failures, and
+        # OSError for read failures. Any of them mean "this file isn't a
+        # usable service-account key"; surface as DriveClientError so the
+        # boot path can log-and-continue instead of crashing with a bare
+        # google-auth traceback.
+        try:
+            credentials = service_account.Credentials.from_service_account_file(  # type: ignore[no-untyped-call]
+                str(credentials_path), scopes=list(scopes)
+            )
+        except (GoogleAuthError, ValueError, OSError) as exc:
+            raise DriveClientError(
+                f"invalid credentials file {credentials_path} ({type(exc).__name__}): {exc}"
+            ) from exc
+        self._credentials: Any = credentials
+        # httplib2.Http is not thread-safe. `requestBuilder` swaps in a
+        # per-thread AuthorizedHttp so DBOS worker threads never race on
+        # one TLS socket (would surface as `ssl.SSLError: record layer failure`).
+        self._thread_local = threading.local()
+        self._service: Any = build(
+            "drive",
+            "v3",
+            credentials=credentials,
+            requestBuilder=self._build_request,
+            cache_discovery=False,
         )
-        self._service: Any = build("drive", "v3", credentials=credentials, cache_discovery=False)
         self._service_account_email: str = getattr(
             credentials, "service_account_email", "<unknown>"
         )
@@ -243,6 +269,11 @@ class DriveClient:
             _download_media_with_retry(service=self._service, file_id=file_id, target=target)
         except HttpError as exc:
             raise _drive_error_from_http(exc) from exc
+        except GoogleAuthError as exc:
+            # Token refresh failed mid-download. Treat as transient — a
+            # real credential problem will surface again on the next call
+            # and cron-driven retries will bring it back.
+            raise DriveTransientError(f"Drive auth failure ({type(exc).__name__}): {exc}") from exc
         except (ServerNotFoundError, ssl.SSLError, TimeoutError, OSError) as exc:
             raise DriveTransientError(
                 f"Drive transport failure ({type(exc).__name__}): {exc}"
@@ -396,6 +427,19 @@ class DriveClient:
         )
         return ChangesPage.model_validate(raw)
 
+    def _build_request(self, _shared_http: Any, *args: Any, **kwargs: Any) -> HttpRequest:
+        # googleapiclient calls this for every HttpRequest the service builds.
+        # We ignore the service's shared http and hand each request this
+        # thread's own AuthorizedHttp so calls never race on one TLS socket.
+        return HttpRequest(self._get_http(), *args, **kwargs)
+
+    def _get_http(self) -> Any:
+        http = getattr(self._thread_local, "http", None)
+        if http is None:
+            http = google_auth_httplib2.AuthorizedHttp(self._credentials, http=httplib2.Http())
+            self._thread_local.http = http
+        return http
+
     def _list_children(self, folder_id: str) -> Iterator[FileMetadata]:
         page_token: str | None = None
         # Drive can return the same file id on two consecutive pages if a
@@ -446,6 +490,16 @@ class DriveClient:
             result = _invoke_with_drive_retry(action)
         except HttpError as exc:
             raise _drive_error_from_http(exc) from exc
+        except GoogleAuthError as exc:
+            # `_perform_refresh_token` raises `RefreshError` from inside
+            # the call — reasons range from "account not found" (bad key,
+            # permanent) to "network to oauth2.googleapis.com timed out"
+            # (transient). Google doesn't offer a machine-readable
+            # distinction, and string-matching on the message is fragile;
+            # treat all as transient. A real bad-key still surfaces on
+            # every call within the boot, and the boot path degrades to
+            # a live-but-503 container instead of a crashloop.
+            raise DriveTransientError(f"Drive auth failure ({type(exc).__name__}): {exc}") from exc
         except (ServerNotFoundError, ssl.SSLError, TimeoutError, OSError) as exc:
             # socket.timeout is TimeoutError on Py3.10+; ConnectionError is
             # an OSError subclass. `except OSError` catches both, plus the

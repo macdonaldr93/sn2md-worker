@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import httplib2
 import pytest
+from google.auth.exceptions import MalformedError, RefreshError
 from googleapiclient.errors import HttpError
 from tenacity import wait_none
 
@@ -34,6 +37,8 @@ def _drive_client_with_service(service: Any) -> DriveClient:
     inst = DriveClient.__new__(DriveClient)
     inst._service = service  # type: ignore[attr-defined]
     inst._service_account_email = "test@example.com"  # type: ignore[attr-defined]
+    inst._credentials = MagicMock()  # type: ignore[attr-defined]
+    inst._thread_local = threading.local()  # type: ignore[attr-defined]
     return inst
 
 
@@ -365,6 +370,83 @@ class TestFindLiveNoteAcceptsNormalNames:
         # THEN
         assert result is not None
         assert result.id == "file-1"
+
+
+class TestGetHttpIsPerThread:
+    def test_each_thread_gets_its_own_authorized_http(self) -> None:
+        # GIVEN — one DriveClient shared across worker threads (production
+        # setup: `_Holder.client` is a process-wide singleton, DBOS runs
+        # workflows on a thread pool).
+        service = MagicMock()
+        drive = _drive_client_with_service(service)
+
+        # WHEN — many threads race to grab their http
+        def _grab() -> tuple[int, int]:
+            http = drive._get_http()
+            # Return (thread ident, id(http)) so we can assert one-to-one.
+            return threading.get_ident(), id(http)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            observed = list(pool.map(lambda _: _grab(), range(64)))
+
+        # THEN — every distinct thread holds a distinct AuthorizedHttp, and
+        # repeated calls from the same thread return the same instance
+        # (the whole point of caching in threading.local).
+        by_thread: dict[int, set[int]] = {}
+        for thread_id, http_id in observed:
+            by_thread.setdefault(thread_id, set()).add(http_id)
+
+        assert all(
+            len(hs) == 1 for hs in by_thread.values()
+        ), "same thread returned multiple Http instances"
+        all_http_ids = {next(iter(hs)) for hs in by_thread.values()}
+        assert len(all_http_ids) == len(
+            by_thread
+        ), "different threads shared the same Http instance — not thread-safe"
+
+
+class TestDriveClientConstructorWrapsMalformedKey:
+    def test_malformed_json_surfaces_as_drive_client_error(self, tmp_path: Path) -> None:
+        # GIVEN — a file that exists but isn't a valid service-account JSON
+        creds = tmp_path / "sa.json"
+        creds.write_text("{}")
+
+        # WHEN / THEN — google-auth raises MalformedError; DriveClient wraps
+        # as DriveClientError so callers only need one exception class.
+        with pytest.raises(DriveClientError, match="invalid credentials file"):
+            DriveClient(creds)
+
+    def test_missing_file_still_raises_drive_client_error(self, tmp_path: Path) -> None:
+        # GIVEN — path doesn't exist
+        creds = tmp_path / "missing.json"
+
+        # WHEN / THEN — pre-check raises before google-auth is called
+        with pytest.raises(DriveClientError, match="credentials file not found"):
+            DriveClient(creds)
+
+
+class TestDriveCallOnRefreshError:
+    def test_wraps_as_transient(self, instant_drive_retries: None) -> None:  # noqa: ARG002
+        # GIVEN — token refresh fails (bad key OR network to oauth2.googleapis.com)
+        def action() -> dict[str, Any]:
+            raise RefreshError("invalid_grant: Invalid grant: account not found")
+
+        # WHEN / THEN — treated as transient per the boundary contract:
+        # Google doesn't distinguish transient network from permanent bad-key
+        # cleanly, so we degrade at boot instead of crashing.
+        with pytest.raises(DriveTransientError, match="RefreshError"):
+            DriveClient._call(action)
+
+    def test_generic_google_auth_error_also_wraps_as_transient(
+        self, instant_drive_retries: None
+    ) -> None:  # noqa: ARG002
+        # GIVEN — a broader GoogleAuthError subclass
+        def action() -> dict[str, Any]:
+            raise MalformedError("missing scope")
+
+        # WHEN / THEN
+        with pytest.raises(DriveTransientError, match="MalformedError"):
+            DriveClient._call(action)
 
 
 class TestDriveErrorFromHttpClassification:

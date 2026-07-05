@@ -68,6 +68,7 @@ packages = ["sn2md_worker"]
 module = [
   "googleapiclient.*",
   "google.oauth2.*",
+  "google_auth_httplib2",
   "httplib2.*",
   "sn2md.*",
   "numpy.*",
