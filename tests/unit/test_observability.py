@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import Session
 
 from sn2md_worker.app import create_app
@@ -22,7 +22,7 @@ from sn2md_worker.db import set_engine
 from sn2md_worker.state import conversions, cursor, watch_channels
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
-from sn2md_worker.state.watch_channels import NewWatchChannel
+from sn2md_worker.state.watch_channels import NewWatchChannel, WatchChannelView
 
 NOW = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
 
@@ -153,6 +153,37 @@ class TestReadyzInProdMode:
         # THEN
         assert response.status_code == 503
 
+    def test_returns_503_gracefully_even_if_expires_at_is_tz_naive(
+        self, engine: Engine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # GIVEN — patched `get_active` returns a WatchChannelView whose
+        # expires_at is tz-naive (simulating a schema drift where the
+        # UTCDateTime decorator got stripped). Without normalization this
+        # would raise TypeError and 500 out.
+        set_settings(_settings(webhook_url="https://example.com/webhook"))
+        naive_expired = datetime(2020, 1, 1)  # noqa: DTZ001
+
+        def fake_get_active(_session: Session) -> WatchChannelView:
+            return WatchChannelView(
+                channel_id="chan-1",
+                resource_id="res-1",
+                token="tok",
+                webhook_url="https://example.com/webhooks/drive",
+                expires_at=naive_expired,
+                start_page_token="1",
+                created_at=datetime(2020, 1, 1),  # noqa: DTZ001
+                is_active=True,
+            )
+
+        monkeypatch.setattr("sn2md_worker.observability.watch_channels.get_active", fake_get_active)
+        client = TestClient(create_app())
+
+        # WHEN
+        response = client.get("/readyz")
+
+        # THEN — still 503, not 500
+        assert response.status_code == 503
+
 
 class TestStatusEndpoint:
     def test_returns_recent_success_failures_channel_and_cursor(self, engine: Engine) -> None:
@@ -210,6 +241,48 @@ class TestStatusEndpoint:
         assert body["watch_channel"]["channel_id"] == "chan-1"
         assert body["watch_channel"]["is_active"] is True
         assert body["change_cursor"]["page_token"] == "42"
+
+    def test_reports_correct_queue_depth_when_workflow_status_rows_exist(
+        self, engine: Engine
+    ) -> None:
+        # GIVEN — hand-crafted `workflow_status` table with a mix of
+        # terminal (SUCCESS, ERROR) and non-terminal (PENDING, ENQUEUED)
+        # rows across both queues, so we can prove the `NOT IN` binding
+        # actually filters correctly.
+        set_settings(_settings())
+        with Session(engine) as session, session.begin():
+            session.execute(
+                text(
+                    "CREATE TABLE workflow_status ("
+                    "  workflow_id TEXT PRIMARY KEY,"
+                    "  queue_name TEXT,"
+                    "  status TEXT"
+                    ")"
+                )
+            )
+            for wf_id, queue, status_ in [
+                ("w1", "convert_queue", "PENDING"),
+                ("w2", "convert_queue", "ENQUEUED"),
+                ("w3", "convert_queue", "SUCCESS"),  # terminal → excluded
+                ("w4", "poll_queue", "PENDING"),
+                ("w5", "poll_queue", "ERROR"),  # terminal → excluded
+                ("w6", None, "PENDING"),  # queue_name NULL → excluded
+            ]:
+                session.execute(
+                    text(
+                        "INSERT INTO workflow_status (workflow_id, queue_name, status) "
+                        "VALUES (:id, :q, :s)"
+                    ),
+                    {"id": wf_id, "q": queue, "s": status_},
+                )
+
+        client = TestClient(create_app())
+
+        # WHEN
+        body = client.get("/status").json()
+
+        # THEN — 2 non-terminal in convert_queue, 1 in poll_queue
+        assert body["queue_depth"] == {"convert_queue": 2, "poll_queue": 1}
 
     def test_reports_zero_queue_depth_when_workflow_status_table_is_absent(
         self, engine: Engine

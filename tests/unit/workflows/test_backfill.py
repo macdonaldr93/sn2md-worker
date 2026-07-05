@@ -165,6 +165,39 @@ class TestWhenPreviousRunEndedInError:
         enqueue.assert_called_once()
 
 
+class TestConversionRecordsAreBulkLoadedOnce:
+    def test_single_list_all_by_key_call_regardless_of_note_count(
+        self,
+        engine: Engine,
+        settings: Settings,
+        drive: MagicMock,  # noqa: ARG002
+    ) -> None:
+        # GIVEN — three seeded records + three Drive files
+        for i in range(3):
+            _seed_success(
+                engine,
+                logical_key=f"Notebooks/seeded-{i}.note",
+                file_id=f"seed-{i}",
+                md5=f"md5-{i}",
+            )
+        drive.list_all_notes.return_value = iter(
+            [(_file(f"f{i}", md5="new-md5"), f"Notebooks/f{i}.note") for i in range(3)]
+        )
+
+        # WHEN — spy on list_all_by_key while running
+        with (
+            patch(
+                "sn2md_worker.workflows.backfill.conversions.list_all_by_key",
+                wraps=conversions.list_all_by_key,
+            ) as spy,
+            patch("sn2md_worker.workflows.backfill.DBOS.enqueue_workflow"),
+        ):
+            backfill_impl(drive=drive, settings=settings)
+
+        # THEN — one bulk load, not N per-file lookups
+        assert spy.call_count == 1
+
+
 class TestWhenSourceFolderIsNotConfigured:
     def test_skips_gracefully(self, engine: Engine, drive: MagicMock) -> None:
         # GIVEN — settings with an empty source_folder_id

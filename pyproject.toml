@@ -17,6 +17,8 @@ dependencies = [
   "sn2md>=2.7.0",
   "llm-gemini>=0.32",
   "structlog>=24.4",
+  "tenacity>=9.1.4",
+  "filelock>=3.29.5",
 ]
 
 [dependency-groups]
@@ -63,7 +65,14 @@ mypy_path = "src"
 packages = ["sn2md_worker"]
 
 [[tool.mypy.overrides]]
-module = ["googleapiclient.*", "google.oauth2.*", "sn2md.*", "numpy.*", "supernotelib.*"]
+module = [
+  "googleapiclient.*",
+  "google.oauth2.*",
+  "httplib2.*",
+  "sn2md.*",
+  "numpy.*",
+  "supernotelib.*",
+]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

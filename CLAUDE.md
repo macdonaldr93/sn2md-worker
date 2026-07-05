@@ -22,14 +22,15 @@ a Docker container on Unraid.
    sits alongside the DBOS-managed engine at the same URL. Our tables:
    `conversion_records`, `page_conversions`, `drive_watch_channels`,
    `drive_change_cursor`, `debounce_state`. Schema init in
-   `state/schema.py` runs `Base.metadata.create_all` plus a targeted
-   `_apply_micro_migrations` for column additions on existing installs.
+   `state/schema.py` runs `Base.metadata.create_all` only.
 
-3. **No migration framework.** `create_all` + a small
-   `_apply_micro_migrations` for nullable column adds. Rename/type-change
-   the recovery path is nuking `data/sn2md-worker.sqlite` and letting
-   `backfill` re-populate from Drive. Drive is source of truth. Revisit
-   Alembic if this stops being cheap.
+3. **No migration framework, no in-place migrations.** `create_all`
+   handles fresh installs; any schema change (column add, index add,
+   constraint) applies on the next fresh boot. Recovery path for a
+   schema break is nuking `data/sn2md-worker.sqlite` and letting
+   `backfill` re-populate from Drive — cheap because Drive is source of
+   truth. Revisit Alembic if we ever grow multiple deploys or state we
+   can't rebuild from Drive.
 
 4. **Workflow wrapper vs impl pattern.** Every `@DBOS.workflow()` in
    `src/sn2md_worker/workflows/` is a thin wrapper that delegates to a
@@ -42,8 +43,8 @@ a Docker container on Unraid.
    `DBOS(...)` construct → `init_schema` → `set_settings/set_engine/set_datasource`
    → try DriveClient → import `workflows` package (registers decorators)
    → `seed_cursor_if_ready` → `DBOS.launch()` → `register_queues` →
-   `register_schedules` (idempotent — `DBOS.create_schedule` raises on
-   restart, we swallow "already exists") → `ensure_active_channel_if_ready`
+   `register_schedules` (idempotent — pre-checks via `DBOS.get_schedule`
+   before calling `create_schedule`) → `ensure_active_channel_if_ready`
    → `enqueue_startup_backfill`. `register_queue` and `create_schedule`
    need DBOS launched first (learned the hard way).
 

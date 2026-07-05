@@ -45,12 +45,18 @@ RUN chmod +x /usr/local/bin/sn2md-entrypoint
 
 EXPOSE 8080
 
+# `timeout=3` on the urlopen means Docker's 5s HEALTHCHECK timeout has
+# headroom to see a non-200 response even against a slow/hung app. Without
+# it, `urlopen` has no default timeout and can leave a socket dangling
+# until Docker kills the whole process — repeated over retries that's a
+# slow leak.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD python -c "import sys, urllib.request as u; sys.exit(0 if u.urlopen('http://localhost:8080/healthz').status == 200 else 1)"
+    CMD python -c "import sys, urllib.request as u; sys.exit(0 if u.urlopen('http://localhost:8080/healthz', timeout=3).status == 200 else 1)"
 
 # ENTRYPOINT runs as root, does the PUID/PGID switch, then drops to `app`
 # to exec the CMD. Invoke python from the pre-built venv directly so `uv
 # run` doesn't try to reconcile the environment at every start (which
-# would pull dev deps back in).
+# would pull dev deps back in). The CMD must stay single-process — DBOS +
+# SQLite state lives in-process and per-worker singletons would race.
 ENTRYPOINT ["/usr/local/bin/sn2md-entrypoint"]
 CMD ["/app/.venv/bin/python", "-m", "sn2md_worker"]

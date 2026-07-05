@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from sn2md_worker.conversion.paths import (
+    UnsafePathError,
     basename,
     logical_key,
     note_output_dir,
@@ -93,3 +94,55 @@ def test_paths_stay_consistent_with_each_other(
     assert sn2md_output_dir(source, Path(vault)) == Path(expected_sn2md_dir)
     assert output_rel_path(source) == expected_rel
     assert str(Path(vault) / expected_rel) == f"{expected_sn2md_dir}/{basename(source)}"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "../escape.note",
+        "Notebooks/../../etc/passwd.note",
+        "..",
+        "./inside.note",
+        "Notebooks/./sneaky.note",
+        "with\x00null.note",
+        "Notebooks/with\x00null.note",
+        "Notebooks//double-slash.note",
+        "",
+        "   ",
+        "/",
+    ],
+)
+def test_unsafe_paths_are_rejected(source: str) -> None:
+    with pytest.raises(UnsafePathError):
+        logical_key(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "CON.note",
+        "prn.note",  # case-insensitive
+        "Aux.note",
+        "NUL.note",
+        "COM1.note",
+        "COM9.note",
+        "LPT1.note",
+        "Notebooks/CON.note",
+    ],
+)
+def test_windows_reserved_names_are_rejected(source: str) -> None:
+    with pytest.raises(UnsafePathError, match="Windows-reserved"):
+        logical_key(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "com10.note",  # only COM1..COM9 are reserved
+        "concord.note",  # starts with CON but stem is CONCORD
+        "prn-notes/journal.note",
+    ],
+)
+def test_names_that_look_reserved_but_are_not_are_accepted(source: str) -> None:
+    # Should not raise
+    logical_key(source)

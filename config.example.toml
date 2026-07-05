@@ -8,7 +8,6 @@ source_folder_id = ""
 poll_debounce_stable_seconds = 30
 poll_debounce_interval_seconds = 10
 poll_debounce_max_iterations = 60
-watch_channel_ttl_days = 6
 fallback_poll_cron = "*/5 * * * *"
 
 [vault]

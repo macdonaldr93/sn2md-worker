@@ -5,6 +5,7 @@ from pathlib import Path
 
 import uvicorn
 from dbos import DBOS, DBOSConfig
+from sqlalchemy.engine import make_url
 
 from sn2md_worker.app import create_app
 from sn2md_worker.config import Settings, load_settings, set_settings
@@ -34,7 +35,13 @@ def main() -> int:
     app = create_app()
 
     dbos_config = _dbos_config(settings)
-    log.info("dbos_init", database_url=dbos_config["system_database_url"])
+    # `render_as_string(hide_password=True)` replaces any embedded userinfo
+    # password with `***`. Today the URL is `sqlite:////data/…` with no
+    # secrets in it, but that changes the day someone points at Postgres.
+    log.info(
+        "dbos_init",
+        database_url=make_url(settings.database.url).render_as_string(hide_password=True),
+    )
     DBOS(config=dbos_config, fastapi=app)
 
     init_schema(settings.database.url)
@@ -73,15 +80,32 @@ def main() -> int:
         workflows.enqueue_startup_backfill()
         log.info("backfill_enqueued")
 
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_config=None)
+    # Single worker is load-bearing: SQLite + DBOS + our singletons all live
+    # in-process. Multi-worker would re-run DBOS(...), init_schema, and
+    # create_schedule per worker and race on the shared SQLite file. Do not
+    # switch to `workers=N`.
+    uvicorn.run(app, host="0.0.0.0", port=8080, workers=1, log_config=None)
     return 0
 
 
 def _dbos_config(settings: Settings) -> DBOSConfig:
-    return DBOSConfig(
+    config = DBOSConfig(
         name="sn2md-worker",
         system_database_url=settings.database.url,
     )
+    # DBOS's internal SystemDatabase / ApplicationDatabase engines don't
+    # set `check_same_thread=False` by default (see .venv .../dbos/
+    # _sys_db_sqlite.py: `_create_engine` just forwards engine_kwargs).
+    # FastAPI's threadpool + DBOS's `dbos-executor-*` pool share a QueuePool,
+    # so a sqlite3 Connection would eventually get handed to a thread it
+    # wasn't opened in and raise `sqlite3.ProgrammingError`. Forwarding
+    # `db_engine_kwargs` here fixes both engines — DBOS copies these
+    # into `sys_db_engine_kwargs` during config translation.
+    if settings.database.url.startswith("sqlite"):
+        config["db_engine_kwargs"] = {
+            "connect_args": {"check_same_thread": False, "timeout": 30},
+        }
+    return config
 
 
 def _current_drive_client() -> DriveClient | None:
@@ -107,11 +131,18 @@ def _try_init_drive_client(settings: Settings) -> None:
 
 
 def _prepare_sqlite_dir(database_url: str) -> None:
-    if not database_url.startswith("sqlite:"):
+    """Ensure the parent directory of a SQLite database file exists.
+
+    Uses `make_url` so `sqlite+pysqlite://` and any other SQLAlchemy
+    variant parse cleanly instead of string-slicing on `sqlite://`.
+    `:memory:` and non-SQLite URLs are no-ops.
+    """
+    parsed = make_url(database_url)
+    if not parsed.drivername.startswith("sqlite"):
         return
-    raw = database_url.split("sqlite://", 1)[1]
-    fs_path = Path(raw[1:]) if raw.startswith("//") else Path(raw.lstrip("/"))
-    fs_path.parent.mkdir(parents=True, exist_ok=True)
+    if not parsed.database or parsed.database == ":memory:":
+        return
+    Path(parsed.database).parent.mkdir(parents=True, exist_ok=True)
 
 
 if __name__ == "__main__":

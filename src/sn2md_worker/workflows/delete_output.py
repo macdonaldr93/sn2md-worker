@@ -11,6 +11,8 @@ from sn2md_worker.db import sql_session
 from sn2md_worker.drive.client import DriveClient, get_drive_client
 from sn2md_worker.logging import get_logger
 from sn2md_worker.state import conversions, page_conversions
+from sn2md_worker.workflows.convert_note import convert_note
+from sn2md_worker.workflows.queues import CONVERT_QUEUE_NAME
 
 __all__ = ["delete_output", "delete_output_impl"]
 
@@ -54,6 +56,15 @@ def delete_output_impl(
                 live = drive.find_live_note(record.parent_folder_id, record.source_name)
                 if live is not None and live.id != file_id:
                     _repoint(logical_key=record.logical_key, new_file_id=live.id)
+                    # Explicitly enqueue a convert for the replacement. If
+                    # poll_changes already saw the create event for `live.id`,
+                    # convert_note's `_already_up_to_date` md5 check makes this
+                    # a fast no-op. If it hasn't (delete-side push arrived
+                    # without the matching create-side push), this is the only
+                    # thing keeping the vault from going stale forever.
+                    DBOS.enqueue_workflow(
+                        CONVERT_QUEUE_NAME, convert_note, live.id, record.source_path
+                    )
                     _log.info(
                         "delete_output_skipped",
                         reason="repointed_to_new_file",
@@ -85,9 +96,7 @@ def delete_output_impl(
 
 def _repoint(*, logical_key: str, new_file_id: str) -> None:
     with sql_session() as session, session.begin():
-        record = conversions.get_by_logical_key(session, logical_key)
-        if record is not None:
-            record.current_file_id = new_file_id
+        conversions.set_current_file_id(session, logical_key=logical_key, new_file_id=new_file_id)
 
 
 def _delete_from_vault(output_rel_path: str, vault_root: Path) -> bool:

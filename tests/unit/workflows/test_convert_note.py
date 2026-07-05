@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -20,6 +21,11 @@ from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
 from sn2md_worker.state.page_conversions import PageConversionUpsert
 from sn2md_worker.workflows.convert_note import convert_note_impl
+
+# `import sn2md_worker.workflows.convert_note as convert_note_module` would
+# resolve to the DBOS-decorated function (re-exported by workflows/__init__),
+# not the module. Use importlib to reach the module for spy hooks.
+convert_note_module = importlib.import_module("sn2md_worker.workflows.convert_note")
 
 
 @pytest.fixture
@@ -230,6 +236,36 @@ class TestWhenTheNoteHasFewerPagesThanBefore:
         assert not (note_dir / "page-03.png").exists()
 
 
+class TestWhenAPngOnlyOrphanExists:
+    def test_removes_the_orphan_png_beyond_current_page_count(
+        self,
+        engine: Engine,
+        settings: Settings,
+        drive: MagicMock,
+        tmp_path: Path,  # noqa: ARG002
+    ) -> None:
+        # GIVEN — page-04.png with no peer page-04.md (a crash between
+        # `copy2(png)` and `write_text(md)` in a prior run)
+        note_dir = tmp_path / "vault" / "Notebooks" / "2026-07"
+        note_dir.mkdir(parents=True)
+        (note_dir / "page-04.png").write_bytes(b"orphan-png")
+        drive.get_metadata.return_value = _file_metadata()
+        _stub_download(drive)
+
+        # WHEN — the new conversion produces 2 pages
+        with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
+            fake_run.return_value = _fake_result(pages=2)
+            convert_note_impl(
+                file_id="file-1",
+                source_path="Notebooks/2026-07.note",
+                drive=drive,
+                settings=settings,
+            )
+
+        # THEN — the orphan PNG is gone even though no .md ever mentioned it
+        assert not (note_dir / "page-04.png").exists()
+
+
 class TestWhenAnOldFlatMarkdownFileExists:
     def test_cleans_up_the_legacy_flat_md_and_sidecar(
         self, engine: Engine, settings: Settings, drive: MagicMock, tmp_path: Path
@@ -358,3 +394,57 @@ class TestWhenNoGeminiKeyIsConfigured:
         # THEN
         fake_run.assert_called_once()
         assert fake_run.call_args.kwargs["api_key"] == "from-env"
+
+
+class TestLockPerLogicalKey:
+    def test_same_key_produces_lockfile_at_same_path(self) -> None:
+        # GIVEN
+        key = "Notebooks/Journal/2026-07.note"
+
+        # WHEN
+        first = convert_note_module._lock_for(key)
+        second = convert_note_module._lock_for(key)
+
+        # THEN — the same lockfile path is used, so an acquire on `first`
+        # blocks a concurrent acquire on `second`.
+        assert first.lock_file == second.lock_file
+
+    def test_different_keys_produce_different_lockfiles(self) -> None:
+        # GIVEN / WHEN
+        first = convert_note_module._lock_for("Notebooks/foo.note")
+        second = convert_note_module._lock_for("Notebooks/bar.note")
+
+        # THEN
+        assert first.lock_file != second.lock_file
+
+
+class TestConvertNoteAcquiresLockAroundWork:
+    def test_lock_for_is_invoked_with_the_logical_key(
+        self,
+        drive: MagicMock,
+        settings: Settings,
+        engine: Engine,  # noqa: ARG002
+        tmp_path: Path,  # noqa: ARG002
+    ) -> None:
+        # GIVEN
+        drive.get_metadata.return_value = _file_metadata()
+        _stub_download(drive)
+
+        # WHEN — spy on `_lock_for` while the workflow runs
+        with (
+            patch(
+                "sn2md_worker.workflows.convert_note._lock_for",
+                wraps=convert_note_module._lock_for,
+            ) as spy,
+            patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run,
+        ):
+            fake_run.return_value = _fake_result(pages=1)
+            convert_note_impl(
+                file_id="file-1",
+                source_path="Notebooks/2026-07.note",
+                drive=drive,
+                settings=settings,
+            )
+
+        # THEN — invoked exactly once with the normalized logical_key
+        spy.assert_called_once_with("Notebooks/2026-07.note")

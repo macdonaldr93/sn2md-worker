@@ -12,8 +12,9 @@ from sn2md_worker.db import sql_session
 from sn2md_worker.drive.client import DriveClient, DriveClientError, get_drive_client
 from sn2md_worker.logging import get_logger
 from sn2md_worker.state import cursor, watch_channels
-from sn2md_worker.state.models import DriveWatchChannel
-from sn2md_worker.state.watch_channels import NewWatchChannel
+from sn2md_worker.state.watch_channels import NewWatchChannel, WatchChannelView
+from sn2md_worker.workflows.poll_changes import poll_changes
+from sn2md_worker.workflows.queues import POLL_QUEUE_NAME
 
 __all__ = [
     "RENEWAL_HEADROOM",
@@ -22,7 +23,13 @@ __all__ = [
     "renew_watch_channel_impl",
 ]
 
-RENEWAL_HEADROOM = timedelta(hours=24)
+# 48h headroom against the daily 06:00 UTC cron: a channel is still
+# eligible for renewal on the run before its final day, so a single
+# missed cron (container down for a day) doesn't leave the channel
+# expiring silently. Combined with the startup recovery poll below,
+# a missed-notifications window is bounded even without a fallback
+# poll_changes cron.
+RENEWAL_HEADROOM = timedelta(hours=48)
 
 _log = get_logger("sn2md_worker.workflows.renew_watch")
 
@@ -89,19 +96,40 @@ def renew_watch_channel_impl(
 
 
 def ensure_active_channel(drive: DriveClient | None, settings: Settings) -> None:
-    """Startup helper: seed the first channel if there isn't one."""
+    """Startup helper: seed the first channel if there isn't one.
+
+    If the previously-active channel has already expired at boot, also
+    enqueues a `poll_changes("recovery")` to catch up on notifications
+    Drive sent while our webhook wasn't listening — needed because we
+    don't run a fallback `poll_changes` cron. The recovery poll uses
+    whatever `drive_change_cursor` we last persisted, so it walks from
+    the last confirmed point rather than the current head.
+    """
     if drive is None:
         _log.warning("renew_watch_skipped", trigger="startup", reason="no_drive_client")
         return
+
+    now = datetime.now(UTC)
+    with sql_session() as session:
+        active = watch_channels.get_active(session)
+
+    if active is not None and active.expires_at <= now:
+        _log.warning(
+            "renew_watch_previous_channel_expired",
+            channel_id=active.channel_id,
+            expired_at=active.expires_at.isoformat(),
+        )
+        DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, "recovery")
+
     renew_watch_channel_impl(
         trigger_source="startup",
         drive=drive,
         settings=settings,
-        now=datetime.now(UTC),
+        now=now,
     )
 
 
-def _try_stop_channel(*, drive: DriveClient, active: DriveWatchChannel) -> None:
+def _try_stop_channel(*, drive: DriveClient, active: WatchChannelView) -> None:
     """Best-effort — tell Drive to stop the old channel so it doesn't
     keep hitting a stale URL. Failures are logged, not fatal."""
     try:
@@ -118,38 +146,74 @@ def _try_stop_channel(*, drive: DriveClient, active: DriveWatchChannel) -> None:
 def _create_and_activate(
     *, drive: DriveClient, settings: Settings, now: datetime, trigger: str
 ) -> None:
+    """Two-phase channel creation.
+
+    Phase 1: pre-persist the row (channel_id + token + placeholder
+    resource_id/expires_at) BEFORE calling Drive. If we crash between
+    Drive's `changes.watch` succeeding and our DB commit, the row still
+    exists on our side, so incoming webhook pushes for the crashed
+    channel can still authenticate (channel_id + token match) — the
+    orphan-on-Drive risk isn't fully eliminated (Drive doesn't expose a
+    "list my channels" API), but at least notifications aren't lost
+    silently.
+
+    Phase 2: `confirm` writes back Drive's real `resource_id` and
+    `expires_at`, then `mark_active` promotes the row. On a Drive-side
+    failure the pending row is rolled back so it doesn't confuse the
+    next renewal.
+    """
     page_token = _current_or_fetch_page_token(drive)
     channel_id = uuid.uuid4().hex
     token = secrets.token_hex(16)
-    ttl_seconds = settings.drive.watch_channel_ttl_days * 86_400
-
-    info = drive.watch_changes(
-        webhook_url=settings.webhook.url,
-        channel_id=channel_id,
-        token=token,
-        start_page_token=page_token,
-        ttl_seconds=ttl_seconds,
-    )
 
     with sql_session() as session, session.begin():
         watch_channels.create(
             session,
             NewWatchChannel(
-                channel_id=info.id,
-                resource_id=info.resource_id,
-                token=info.token,
+                channel_id=channel_id,
+                # Placeholders — `confirm` overwrites both once Drive replies.
+                # A row in this state is "pending": auth-usable but not yet
+                # promoted via `mark_active`.
+                resource_id="",
+                token=token,
                 webhook_url=settings.webhook.url,
-                expires_at=info.expiration,
+                expires_at=now,
                 start_page_token=page_token,
                 created_at=now,
             ),
         )
-        watch_channels.mark_active(session, info.id)
+
+    try:
+        info = drive.watch_changes(
+            webhook_url=settings.webhook.url,
+            channel_id=channel_id,
+            token=token,
+            start_page_token=page_token,
+        )
+    except Exception:
+        # Drive rejected the request — roll back the pending row so it
+        # doesn't confuse future renewals into thinking a channel exists.
+        with sql_session() as session, session.begin():
+            watch_channels.delete_by_id(session, channel_id)
+        raise
+
+    with sql_session() as session, session.begin():
+        # Confirm and promote using OUR channel_id, not `info.id` — Drive
+        # echoes it back, but the pending row we just wrote is keyed on
+        # what we generated, and trusting our local id survives a
+        # (theoretical) Drive-side echo bug.
+        watch_channels.confirm(
+            session,
+            channel_id=channel_id,
+            resource_id=info.resource_id,
+            expires_at=info.expiration,
+        )
+        watch_channels.mark_active(session, channel_id)
 
     _log.info(
         "renew_watch_channel_created",
         trigger=trigger,
-        channel_id=info.id,
+        channel_id=channel_id,
         resource_id=info.resource_id,
         expires_at=info.expiration.isoformat(),
     )

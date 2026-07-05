@@ -66,3 +66,34 @@ def test_file_with_no_parents_returns_none() -> None:
     )
 
     assert result is None
+
+
+def test_multi_parent_falls_back_to_a_parent_that_reaches_the_root() -> None:
+    # parents[0] leads outside our source tree; parents[1] leads to root.
+    # Old impl silently picked parents[0] and returned None; new impl
+    # tries each parent and returns the path via the one that resolves.
+    store = {
+        "F": FileMetadata(id="F", name="2026-07.note", parents=("STRAY", "SUB")),
+        "STRAY": FileMetadata(id="STRAY", name="Strays", parents=()),
+        "SUB": FileMetadata(id="SUB", name="Journal", parents=(ROOT,)),
+    }
+
+    result = resolve_source_path(
+        file_id="F", root_folder_id=ROOT, get_metadata=_fake_get_metadata(store)
+    )
+
+    assert result == "Journal/2026-07.note"
+
+
+def test_no_parent_reaches_root_returns_none() -> None:
+    store = {
+        "F": FileMetadata(id="F", name="stray.note", parents=("A", "B")),
+        "A": FileMetadata(id="A", name="A", parents=()),
+        "B": FileMetadata(id="B", name="B", parents=("A",)),
+    }
+
+    result = resolve_source_path(
+        file_id="F", root_folder_id=ROOT, get_metadata=_fake_get_metadata(store)
+    )
+
+    assert result is None

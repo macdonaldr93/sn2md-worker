@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import Engine, create_engine
@@ -18,7 +18,9 @@ from sn2md_worker.drive.models import FileMetadata
 from sn2md_worker.state import conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
+from sn2md_worker.workflows.convert_note import convert_note
 from sn2md_worker.workflows.delete_output import delete_output_impl
+from sn2md_worker.workflows.queues import CONVERT_QUEUE_NAME
 
 NOW = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
 LOGICAL_KEY = "Notebooks/2026-07.note"
@@ -98,7 +100,8 @@ class TestWhenLiveFileStillExistsAtSameLocation:
         )
 
         # WHEN
-        delete_output_impl(file_id="file-old", drive=drive, settings=settings)
+        with patch("sn2md_worker.workflows.delete_output.DBOS.enqueue_workflow") as enqueue:
+            delete_output_impl(file_id="file-old", drive=drive, settings=settings)
 
         # THEN — vault output remains
         assert (note_dir / "2026-07.md").exists()
@@ -108,6 +111,15 @@ class TestWhenLiveFileStillExistsAtSameLocation:
             record = conversions.get_by_logical_key(session, LOGICAL_KEY)
         assert record is not None
         assert record.current_file_id == "file-new"
+
+        # AND — convert_note is explicitly enqueued for the replacement, so the
+        # vault won't go stale even if the create-side push was missed.
+        enqueue.assert_called_once()
+        args, _ = enqueue.call_args
+        assert args[0] == CONVERT_QUEUE_NAME
+        assert args[1] is convert_note
+        assert args[2] == "file-new"
+        assert args[3] == LOGICAL_KEY  # source_path == logical_key in this fixture
 
 
 class TestWhenNoLiveFileExistsAtSameLocation:

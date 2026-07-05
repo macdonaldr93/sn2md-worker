@@ -122,3 +122,52 @@ class TestRecordFailure:
         assert record.last_status == ConversionStatus.ERROR
         assert record.last_error == "gemini quota exceeded"
         assert record.attempts == 1
+
+
+class TestViewsAreDetachedFromTheSession:
+    def test_attributes_remain_readable_after_the_session_closes(self, session: Session) -> None:
+        # GIVEN — a record persisted inside the fixture's session
+        conversions.upsert(session, _make_upsert(source_md5="abc123"))
+        session.flush()
+
+        # WHEN — grab a view, then explicitly close the session
+        view = conversions.get_by_logical_key(session, LOGICAL_KEY)
+        session.close()
+
+        # THEN — the view is a plain dataclass; no `DetachedInstanceError`
+        # can bite here because there is no ORM state to lazy-load. This
+        # is the contract that makes repo returns safe for callers that
+        # release the session before touching the data.
+        assert view is not None
+        assert view.source_md5 == "abc123"
+        assert view.logical_key == LOGICAL_KEY
+
+
+class TestRecordFailureOnAnExistingSuccessfulRecord:
+    def test_preserves_source_md5_and_output_path_and_increments_attempts(
+        self, session: Session
+    ) -> None:
+        # GIVEN — a prior successful conversion
+        conversions.upsert(session, _make_upsert(source_md5="original-md5"))
+        session.flush()
+
+        # WHEN — a later retry fails
+        conversions.record_failure(
+            session,
+            logical_key=LOGICAL_KEY,
+            current_file_id="file-1",
+            source_name="2026-07.note",
+            source_path=LOGICAL_KEY,
+            error="gemini timeout",
+            when=NOW,
+        )
+        session.flush()
+
+        # THEN — success-only fields are preserved; error fields updated
+        record = conversions.get_by_logical_key(session, LOGICAL_KEY)
+        assert record is not None
+        assert record.last_status == ConversionStatus.ERROR
+        assert record.last_error == "gemini timeout"
+        assert record.source_md5 == "original-md5"
+        assert record.output_rel_path == "Notebooks/Journal/2026-07"
+        assert record.attempts == 2

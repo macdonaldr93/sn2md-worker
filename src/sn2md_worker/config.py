@@ -19,7 +19,6 @@ class DriveConfig(BaseModel, frozen=True):
     poll_debounce_stable_seconds: int = Field(default=30, ge=1)
     poll_debounce_interval_seconds: int = Field(default=10, ge=1)
     poll_debounce_max_iterations: int = Field(default=60, ge=1)
-    watch_channel_ttl_days: int = Field(default=6, ge=1, le=7)
     fallback_poll_cron: str = "*/5 * * * *"
 
 

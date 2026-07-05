@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from sn2md_worker.state import watch_channels
+from sn2md_worker.state.models import DriveWatchChannel
 from sn2md_worker.state.watch_channels import NewWatchChannel
 
 
@@ -70,3 +73,31 @@ class TestGetActive:
 
         # WHEN / THEN
         assert watch_channels.get_active(session) is None
+
+
+class TestActiveChannelDbConstraint:
+    def test_second_active_row_is_rejected_at_the_db_level(self, session: Session) -> None:
+        # GIVEN — chan-1 is legitimately active
+        watch_channels.create(session, _make("chan-1"))
+        watch_channels.mark_active(session, "chan-1")
+        session.flush()
+
+        # WHEN — someone bypasses `mark_active` and tries to insert a
+        # second row with is_active=True (simulating a bug in future code).
+        now = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+        session.add(
+            DriveWatchChannel(
+                channel_id="chan-2",
+                resource_id="res-chan-2",
+                token="secret",
+                webhook_url="https://example.com/webhooks/drive",
+                expires_at=now + timedelta(days=7),
+                start_page_token="10",
+                created_at=now,
+                is_active=True,
+            )
+        )
+
+        # THEN — the partial unique index catches it before commit
+        with pytest.raises(IntegrityError):
+            session.flush()

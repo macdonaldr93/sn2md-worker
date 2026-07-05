@@ -13,10 +13,12 @@ class TestRecordProbeForANewFileId:
         when = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
 
         # WHEN
-        state = debounce.record_probe(session, file_id="file-1", size=100, md5="abc", when=when)
+        debounce.record_probe(session, file_id="file-1", size=100, md5="abc", when=when)
         session.flush()
 
         # THEN
+        state = debounce.get(session, "file-1")
+        assert state is not None
         assert state.file_id == "file-1"
         assert state.stable_since == when
 
@@ -56,6 +58,25 @@ class TestRecordProbeWhenSizeChanges:
         state = debounce.get(session, "file-1")
         assert state is not None
         assert state.stable_since == t1
+
+
+class TestRecordProbeWhenSizeAndMd5AreBothNull:
+    def test_preserves_stable_since_via_null_safe_equality(self, session: Session) -> None:
+        # GIVEN — first probe with no size/md5 yet known
+        t0 = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+        t1 = t0 + timedelta(seconds=10)
+        debounce.record_probe(session, file_id="file-1", size=None, md5=None, when=t0)
+        session.flush()
+
+        # WHEN — a follow-up probe still has no size/md5
+        debounce.record_probe(session, file_id="file-1", size=None, md5=None, when=t1)
+        session.flush()
+
+        # THEN — NULL == NULL must count as unchanged, so stable_since is preserved
+        state = debounce.get(session, "file-1")
+        assert state is not None
+        assert state.stable_since == t0
+        assert state.updated_at == t1
 
 
 class TestClear:

@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from dbos._error import DBOSQueueDeduplicatedError  # noqa: PLC2701
 from fastapi.testclient import TestClient
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
@@ -148,6 +149,107 @@ class TestWhenTokenDoesNotMatch:
         # THEN
         assert response.status_code == 200
         enqueue.assert_not_called()
+
+
+class TestWhenChannelIsExpired:
+    def test_still_returns_200_but_does_not_enqueue(self, engine: Engine) -> None:
+        # GIVEN — a channel whose expires_at is already in the past
+        past = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+        with Session(engine) as session, session.begin():
+            watch_channels.create(
+                session,
+                NewWatchChannel(
+                    channel_id=CHANNEL_ID,
+                    resource_id="res-1",
+                    token=CHANNEL_TOKEN,
+                    webhook_url="https://example.com/webhooks/drive",
+                    expires_at=past - timedelta(days=1),
+                    start_page_token="1",
+                    created_at=past - timedelta(days=8),
+                ),
+            )
+            watch_channels.mark_active(session, CHANNEL_ID)
+        client = TestClient(create_app())
+
+        # WHEN
+        with patch("sn2md_worker.drive.webhook.DBOS.enqueue_workflow") as enqueue:
+            response = client.post(
+                "/webhooks/drive",
+                headers={
+                    "X-Goog-Channel-Id": CHANNEL_ID,
+                    "X-Goog-Channel-Token": CHANNEL_TOKEN,
+                    "X-Goog-Resource-Id": "res-1",
+                    "X-Goog-Resource-State": "change",
+                    "X-Goog-Message-Number": "42",
+                },
+            )
+
+        # THEN
+        assert response.status_code == 200
+        enqueue.assert_not_called()
+
+
+class TestWhenGoogleRetriesTheSameMessage:
+    def test_dbos_dedup_error_is_absorbed_and_response_is_still_200(
+        self,
+        engine: Engine,
+        registered_channel: None,  # noqa: ARG002
+    ) -> None:
+        # GIVEN
+        client = TestClient(create_app())
+
+        def raise_dedup(*args: object, **kwargs: object) -> None:  # noqa: ARG001
+            raise DBOSQueueDeduplicatedError(
+                workflow_id="wf-1",
+                queue_name=POLL_QUEUE_NAME,
+                deduplication_id=f"{CHANNEL_ID}:42",
+            )
+
+        # WHEN
+        with patch(
+            "sn2md_worker.drive.webhook.DBOS.enqueue_workflow",
+            side_effect=raise_dedup,
+        ) as enqueue:
+            response = client.post(
+                "/webhooks/drive",
+                headers={
+                    "X-Goog-Channel-Id": CHANNEL_ID,
+                    "X-Goog-Channel-Token": CHANNEL_TOKEN,
+                    "X-Goog-Resource-Id": "res-1",
+                    "X-Goog-Resource-State": "change",
+                    "X-Goog-Message-Number": "42",
+                },
+            )
+
+        # THEN — enqueue attempted once and absorbed as ack
+        assert response.status_code == 200
+        enqueue.assert_called_once()
+
+
+class TestWhenAuthenticatedButMessageNumberIsMissing:
+    def test_still_enqueues_without_dedup(
+        self,
+        engine: Engine,
+        registered_channel: None,  # noqa: ARG002
+    ) -> None:
+        # GIVEN
+        client = TestClient(create_app())
+
+        # WHEN — no X-Goog-Message-Number header
+        with patch("sn2md_worker.drive.webhook.DBOS.enqueue_workflow") as enqueue:
+            response = client.post(
+                "/webhooks/drive",
+                headers={
+                    "X-Goog-Channel-Id": CHANNEL_ID,
+                    "X-Goog-Channel-Token": CHANNEL_TOKEN,
+                    "X-Goog-Resource-Id": "res-1",
+                    "X-Goog-Resource-State": "change",
+                },
+            )
+
+        # THEN
+        assert response.status_code == 200
+        enqueue.assert_called_once()
 
 
 class TestWhenGoogHeadersAreMissing:

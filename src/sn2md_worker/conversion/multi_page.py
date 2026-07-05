@@ -12,7 +12,7 @@ concatenated Markdown file per note) so we can:
 from __future__ import annotations
 
 import hashlib
-import shutil
+import re
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,6 +21,14 @@ from pathlib import Path
 from sn2md.ai_utils import image_to_markdown
 from sn2md.importers.note import NotebookExtractor
 from sn2md.types import TO_MARKDOWN_TEMPLATE
+from tenacity import (
+    RetryCallState,
+    retry,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
+
+from sn2md_worker.logging import get_logger
 
 __all__ = [
     "DEFAULT_PROMPT",
@@ -32,6 +40,18 @@ __all__ = [
     "page_index_from_filename",
     "run_multi_page",
 ]
+
+_log = get_logger("sn2md_worker.conversion.multi_page")
+
+# Retry budget: 3 attempts with exponential backoff + jitter, bounded
+# well under a minute in the worst case. Retries any Exception because
+# sn2md wraps underlying-SDK errors (llm-gemini / google-generativeai /
+# grpc) with no stable public type surface; the tri-attempt cap covers
+# transient 429/5xx without pretending we can enumerate every permanent
+# failure mode.
+_GEMINI_MAX_ATTEMPTS = 3
+_GEMINI_BACKOFF_INITIAL_SECONDS = 2
+_GEMINI_BACKOFF_MAX_SECONDS = 20
 
 # We take sn2md's `TO_MARKDOWN_TEMPLATE` as our base — same {context}
 # placeholder, same core rules — and layer on stricter guidance so
@@ -105,7 +125,11 @@ def run_multi_page(
         pngs = _extract_pngs(note_path, Path(extract_root))
         previous_markdown = ""
         for page_index, png_path in enumerate(pngs):
-            page_md5 = _hash_file(png_path)
+            # One read: buffer + hash in a single pass. If the page is
+            # cached we drop the buffer; if not we write it out below,
+            # avoiding the second full read `shutil.copy2` used to do.
+            page_bytes = png_path.read_bytes()
+            page_md5 = hashlib.md5(page_bytes, usedforsecurity=False).hexdigest()
             page_md = output_dir / page_filename(page_index)
             page_png = output_dir / _asset_filename(page_index)
             cached = existing_pages.get(page_index) == page_md5 and page_md.exists()
@@ -115,14 +139,23 @@ def run_multi_page(
             else:
                 context = _tail(previous_markdown)
                 try:
-                    llm_output = image_to_markdown(
-                        str(png_path), context, api_key, model, prompt_template
+                    llm_output = _call_gemini_with_retry(
+                        png_path=png_path,
+                        context=context,
+                        api_key=api_key,
+                        model=model,
+                        prompt_template=prompt_template,
                     )
                 except Exception as exc:  # noqa: BLE001
+                    # Preserve type name so structured log downstream can
+                    # tell 429/5xx (retried, still failed) from 400 auth /
+                    # payload errors (would have failed on attempt 1).
                     raise Sn2mdRunError(
-                        f"Gemini failed on page {page_index + 1} of {note_path.name}: {exc}"
+                        f"Gemini failed on page {page_index + 1} of "
+                        f"{note_path.name} after retries "
+                        f"({type(exc).__name__}: {exc})"
                     ) from exc
-                shutil.copy2(png_path, page_png)
+                page_png.write_bytes(page_bytes)
                 rendered = _render_page(
                     page_index=page_index,
                     total=len(pngs),
@@ -156,18 +189,59 @@ def index_filename() -> str:
 
 
 def page_index_from_filename(name: str) -> int | None:
-    """Reverse of `page_filename`: parse `page-NN.md` back to the 0-index.
+    """Parse `page-NN.md` or `page-NN.png` back to the 0-index.
 
-    Returns `None` when the name doesn't fit the pattern — used by
-    cleanup code to walk the note's output directory safely.
+    Returns `None` when the name doesn't fit either pattern — used by
+    cleanup code to walk the note's output directory safely. The `.png`
+    variant is what lets `_cleanup_stale_pages` prune PNG-only orphans
+    left behind if we crashed between `copy2(png)` and `write_text(md)`.
     """
-    stem = name.removesuffix(".md")
+    stem = name.removesuffix(".md").removesuffix(".png")
     if not stem.startswith("page-"):
         return None
     try:
         return int(stem.removeprefix("page-")) - 1
     except ValueError:
         return None
+
+
+def _log_gemini_retry(retry_state: RetryCallState) -> None:
+    """tenacity `before_sleep` hook — one structured warning per backoff."""
+    exc = retry_state.outcome.exception() if retry_state.outcome is not None else None
+    next_wait = retry_state.next_action.sleep if retry_state.next_action is not None else 0
+    _log.warning(
+        "gemini_call_retry_scheduled",
+        attempt=retry_state.attempt_number,
+        max_attempts=_GEMINI_MAX_ATTEMPTS,
+        next_wait_seconds=round(next_wait, 2),
+        error_type=type(exc).__name__ if exc is not None else None,
+        error=str(exc) if exc is not None else None,
+    )
+
+
+@retry(
+    stop=stop_after_attempt(_GEMINI_MAX_ATTEMPTS),
+    wait=wait_exponential_jitter(
+        initial=_GEMINI_BACKOFF_INITIAL_SECONDS, max=_GEMINI_BACKOFF_MAX_SECONDS
+    ),
+    before_sleep=_log_gemini_retry,
+    reraise=True,
+)
+def _call_gemini_with_retry(
+    *,
+    png_path: Path,
+    context: str,
+    api_key: str,
+    model: str,
+    prompt_template: str,
+) -> str:
+    """Invoke sn2md's Gemini call with bounded exponential-backoff retry.
+
+    Idempotent by construction — no side effects until the caller writes
+    the returned markdown to disk — so retrying is always safe.
+    """
+    result: str = image_to_markdown(str(png_path), context, api_key, model, prompt_template)
+    return result
 
 
 def _asset_filename(page_index: int) -> str:
@@ -179,15 +253,25 @@ def _extract_pngs(note_path: Path, dest: Path) -> list[Path]:
         raw = NotebookExtractor().extract_images(str(note_path), str(dest))
     except Exception as exc:  # noqa: BLE001
         raise Sn2mdRunError(f"sn2md failed to extract images from {note_path.name}: {exc}") from exc
-    return [Path(p) for p in raw]
+    return _sort_by_page_number([Path(p) for p in raw])
 
 
-def _hash_file(path: Path) -> str:
-    md5 = hashlib.md5(usedforsecurity=False)
-    with path.open("rb") as fh:
-        for chunk in iter(lambda: fh.read(64 * 1024), b""):
-            md5.update(chunk)
-    return md5.hexdigest()
+_PAGE_NUMBER_RE = re.compile(r"\d+")
+
+
+def _sort_by_page_number(paths: list[Path]) -> list[Path]:
+    """Sort by the first integer in the filename, then by name for ties.
+
+    Guards against sn2md's undocumented filename ordering: lexical sort
+    puts `page-10.png` before `page-2.png`, which would misalign the
+    (index, hash) cache key and rewrite pages into the wrong slots.
+    """
+
+    def key(path: Path) -> tuple[int, str]:
+        match = _PAGE_NUMBER_RE.search(path.stem)
+        return (int(match.group(0)) if match else 10**9, path.name)
+
+    return sorted(paths, key=key)
 
 
 def _tail(markdown: str, length: int = 200) -> str:

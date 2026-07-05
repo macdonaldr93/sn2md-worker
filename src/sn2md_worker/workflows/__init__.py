@@ -8,7 +8,6 @@ correct order after `DBOS.launch()`.
 from __future__ import annotations
 
 from dbos import DBOS
-from dbos._error import DBOSException  # noqa: PLC2701
 
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.drive.client import DriveClient
@@ -17,10 +16,14 @@ from sn2md_worker.workflows.backfill import backfill, backfill_impl
 from sn2md_worker.workflows.convert_note import convert_note, convert_note_impl
 from sn2md_worker.workflows.delete_output import delete_output, delete_output_impl
 from sn2md_worker.workflows.poll_changes import (
-    CONVERT_QUEUE_NAME,
     poll_changes,
     poll_changes_impl,
     seed_cursor,
+)
+from sn2md_worker.workflows.queues import (
+    CONVERT_QUEUE_NAME,
+    DELETE_QUEUE_NAME,
+    POLL_QUEUE_NAME,
 )
 from sn2md_worker.workflows.renew_watch import (
     ensure_active_channel,
@@ -29,14 +32,13 @@ from sn2md_worker.workflows.renew_watch import (
 )
 
 _log = get_logger("sn2md_worker.workflows")
-_SCHEDULE_EXISTS_MARKER = "already exists"
 
-POLL_QUEUE_NAME = "poll_queue"
 RENEW_SCHEDULE_NAME = "renew-watch-channel"
 RENEW_SCHEDULE_CRON = "0 6 * * *"  # daily at 06:00 UTC
 
 __all__ = [
     "CONVERT_QUEUE_NAME",
+    "DELETE_QUEUE_NAME",
     "POLL_QUEUE_NAME",
     "RENEW_SCHEDULE_CRON",
     "RENEW_SCHEDULE_NAME",
@@ -60,12 +62,19 @@ __all__ = [
 
 
 def register_queues() -> None:
-    """Register DBOS queues. Call after DBOS.launch()."""
+    """Register DBOS queues. Call after DBOS.launch().
+
+    `delete_queue` is separate from `convert_queue` so a batch of long
+    Gemini-bound conversions never blocks the fast filesystem-only
+    deletes; a stale delete arriving mid-backfill can complete without
+    waiting behind the pipeline in front of it.
+    """
     settings = get_settings()
     DBOS.register_queue(
         CONVERT_QUEUE_NAME,
         worker_concurrency=settings.queue.convert_concurrency,
     )
+    DBOS.register_queue(DELETE_QUEUE_NAME, worker_concurrency=2)
     DBOS.register_queue(POLL_QUEUE_NAME, worker_concurrency=1)
 
 
@@ -73,21 +82,21 @@ def register_schedules() -> None:
     """Register DBOS schedules. Call after DBOS.launch().
 
     Idempotent — DBOS persists schedule rows in `workflow_schedules`, so
-    a second boot raises `DBOSException("... already exists")`. Treat
-    that as a no-op. Changing the cron requires deleting the row (or
-    nuking the SQLite file).
+    a second boot on the same DB already has our row. We pre-check via
+    `DBOS.get_schedule` rather than catching a substring on `DBOSException`
+    so a DBOS message-format change doesn't turn benign re-registration
+    into a boot failure. Changing the cron requires deleting the row
+    (or nuking the SQLite file).
     """
-    try:
-        DBOS.create_schedule(
-            schedule_name=RENEW_SCHEDULE_NAME,
-            workflow_fn=renew_watch_channel,
-            schedule=RENEW_SCHEDULE_CRON,
-            context="cron",
-        )
-    except DBOSException as exc:
-        if _SCHEDULE_EXISTS_MARKER not in str(exc):
-            raise
+    if DBOS.get_schedule(RENEW_SCHEDULE_NAME) is not None:
         _log.info("schedule_already_registered", schedule_name=RENEW_SCHEDULE_NAME)
+        return
+    DBOS.create_schedule(
+        schedule_name=RENEW_SCHEDULE_NAME,
+        workflow_fn=renew_watch_channel,
+        schedule=RENEW_SCHEDULE_CRON,
+        context="cron",
+    )
 
 
 def seed_cursor_if_ready(drive: DriveClient | None) -> None:

@@ -10,12 +10,20 @@ from __future__ import annotations
 from pathlib import Path, PurePosixPath
 
 __all__ = [
+    "UnsafePathError",
     "basename",
     "logical_key",
     "note_output_dir",
     "output_rel_path",
     "sn2md_output_dir",
 ]
+
+
+class UnsafePathError(ValueError):
+    """Raised when a Drive-derived path contains components that would
+    let vault writes escape the vault root or land on Windows-reserved
+    filenames. Callers should log-and-skip the affected note.
+    """
 
 
 def logical_key(drive_source_path: str) -> str:
@@ -63,4 +71,33 @@ def output_rel_path(drive_source_path: str) -> str:
 
 
 def _normalize(drive_source_path: str) -> str:
-    return drive_source_path.replace("\\", "/").strip().strip("/")
+    cleaned = drive_source_path.replace("\\", "/").strip().strip("/")
+    if not cleaned:
+        raise UnsafePathError("empty drive source path")
+    parts = cleaned.split("/")
+    for part in parts:
+        _reject_unsafe_component(part)
+    return cleaned
+
+
+# CON/PRN/AUX/NUL/COM1-9/LPT1-9 are reserved on Windows regardless of
+# extension. We reject them so a note synced from a Supernote to a
+# vault that ever lives on Windows/exFAT doesn't produce ghost files.
+_WINDOWS_RESERVED_NAMES = frozenset(
+    {"CON", "PRN", "AUX", "NUL"}
+    | {f"COM{i}" for i in range(1, 10)}
+    | {f"LPT{i}" for i in range(1, 10)}
+)
+
+
+def _reject_unsafe_component(part: str) -> None:
+    if not part:
+        raise UnsafePathError("empty path component (double-slash in source path)")
+    if part in (".", ".."):
+        raise UnsafePathError(f"path component {part!r} would traverse outside the vault")
+    if "\x00" in part:
+        raise UnsafePathError(f"path component {part!r} contains NUL")
+    # Split on '.' and check the stem so `CON.note` is caught, not just `CON`.
+    stem = part.split(".", 1)[0]
+    if stem.upper() in _WINDOWS_RESERVED_NAMES:
+        raise UnsafePathError(f"path component {part!r} is a Windows-reserved filename")

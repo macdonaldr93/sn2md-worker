@@ -27,11 +27,17 @@ if [ -f "/usr/share/zoneinfo/${TZ}" ]; then
   echo "${TZ}" > /etc/timezone
 fi
 
-# Make sure the paths the app writes to are owned by app. `chown -R` on a
-# very large vault could be slow; skip with `CHOWN_ON_START=false` if that
-# ever becomes a problem.
+# Make sure the writable volumes are owned by app. `/app/.venv` is baked at
+# build time and already `app`-owned, so it stays out of this list — no
+# point paying the recursive chown on every start.  A very large vault could
+# make `chown -R` slow; skip with `CHOWN_ON_START=false` if that bites.
+#
+# Errors are surfaced instead of swallowed with `2>/dev/null || true`. A
+# read-only bind mount or a disk-full condition here means the app can't
+# write anything at runtime — better to fail loudly at boot than to run a
+# silently-broken container.
 if [ "${CHOWN_ON_START:-true}" = "true" ]; then
-  chown -R app:app /data /vault /app/.venv 2>/dev/null || true
+  chown -R app:app /data /vault
 fi
 
 umask "${UMASK_VALUE}"

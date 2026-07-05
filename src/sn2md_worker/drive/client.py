@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import time
+import ssl
 from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -9,8 +9,18 @@ from typing import Any
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from googleapiclient.http import MediaIoBaseDownload
+from httplib2 import ServerNotFoundError
+from tenacity import (
+    RetryCallState,
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential_jitter,
+)
 
 from sn2md_worker.drive.models import ChangesPage, ChannelInfo, FileMetadata
+from sn2md_worker.logging import get_logger
 
 __all__ = [
     "DEFAULT_CHANGES_FIELDS",
@@ -25,7 +35,29 @@ __all__ = [
 
 DEFAULT_SCOPES: tuple[str, ...] = ("https://www.googleapis.com/auth/drive.readonly",)
 
+_log = get_logger("sn2md_worker.drive.client")
+
 _HTTP_NOT_FOUND = 404
+_HTTP_TOO_MANY_REQUESTS = 429
+_HTTP_CLIENT_ERROR_MIN = 400
+_HTTP_SERVER_ERROR_MIN = 500
+_HTTP_SERVER_ERROR_MAX_EXCLUSIVE = 600
+
+# Retry budget: 3 attempts with exponential backoff + jitter, bounded
+# well under a minute in the worst case. Transient conditions retried:
+# HTTP 429 (rate-limited), 5xx (server), plus network-level exceptions
+# that googleapiclient does not wrap. Permanent 4xx (400/401/403/404) are
+# not retried — those want to surface immediately so callers can decide.
+_DRIVE_MAX_ATTEMPTS = 3
+_DRIVE_BACKOFF_INITIAL_SECONDS = 2
+_DRIVE_BACKOFF_MAX_SECONDS = 20
+
+# 4 MB chunks — big enough that a typical Supernote `.note` (single-digit
+# MB) downloads in one round trip, small enough that we never buffer a
+# runaway file in memory. `MediaIoBaseDownload` requests each chunk via
+# HTTP Range so the process memory ceiling is one chunksize regardless of
+# the file's total size — the whole point of switching off `.execute()`.
+_DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 
 DEFAULT_FILE_FIELDS = "id,name,md5Checksum,size,parents,mimeType,trashed,modifiedTime"
 DEFAULT_CHANGES_FIELDS = (
@@ -38,7 +70,123 @@ _NOTE_EXTENSION = ".note"
 
 
 class DriveClientError(RuntimeError):
-    """Raised when a Drive API call fails or credentials are misconfigured."""
+    """Raised when a Drive API call fails or credentials are misconfigured.
+
+    Callers that need to react differently to permanent vs. transient
+    failures (`poll_changes` uses this to decide whether to raise or
+    log-skip) should catch `DrivePermanentError` or `DriveTransientError`
+    specifically. Legacy raises of the plain base class are still used
+    for schema/response-shape errors that aren't Drive HTTP failures.
+    """
+
+
+class DrivePermanentError(DriveClientError):
+    """A Drive HTTP call failed with a non-retryable 4xx.
+
+    Represents "the resource is gone / rejected / forbidden" — the
+    condition won't change if we retry, so callers can log-and-skip and
+    move on to whatever's next instead of stalling the pipeline.
+    """
+
+
+class DriveTransientError(DriveClientError):
+    """A Drive HTTP call failed with 5xx / 429 / network error after retries.
+
+    The condition is expected to clear with time (backoff, rate-limit
+    window expiring, network recovery). Callers should let this
+    propagate so the surrounding DBOS workflow retries from its
+    checkpoint rather than silently dropping the work.
+    """
+
+
+def _drive_error_from_http(exc: HttpError) -> DriveClientError:
+    """Wrap an HttpError as `Permanent` or `Transient` based on status.
+
+    4xx (except 429, which was retried and exhausted → transient by that
+    point) are permanent; the resource is gone or the request was
+    malformed and re-trying doesn't help. Everything else — no status,
+    5xx after retries — is transient and expected to clear.
+    """
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if (
+        isinstance(status, int)
+        and _HTTP_CLIENT_ERROR_MIN <= status < _HTTP_SERVER_ERROR_MIN
+        and status != _HTTP_TOO_MANY_REQUESTS
+    ):
+        return DrivePermanentError(str(exc))
+    return DriveTransientError(str(exc))
+
+
+def _is_transient_drive_error(exc: BaseException) -> bool:
+    """True for errors worth retrying: 429, 5xx, or network-level failures."""
+    if isinstance(exc, HttpError):
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        if status == _HTTP_TOO_MANY_REQUESTS:
+            return True
+        return (
+            isinstance(status, int)
+            and _HTTP_SERVER_ERROR_MIN <= status < _HTTP_SERVER_ERROR_MAX_EXCLUSIVE
+        )
+    # socket.timeout is aliased to TimeoutError on Py3.10+, so TimeoutError
+    # covers both. ConnectionError catches ECONNRESET/ECONNREFUSED. Do NOT
+    # retry every OSError — a local-file permission issue shouldn't loop.
+    return isinstance(exc, ServerNotFoundError | ssl.SSLError | TimeoutError | ConnectionError)
+
+
+def _log_drive_retry(retry_state: RetryCallState) -> None:
+    """tenacity `before_sleep` hook — one structured warning per backoff."""
+    exc = retry_state.outcome.exception() if retry_state.outcome is not None else None
+    next_wait = retry_state.next_action.sleep if retry_state.next_action is not None else 0
+    status = None
+    if isinstance(exc, HttpError):
+        status = getattr(getattr(exc, "resp", None), "status", None)
+    _log.warning(
+        "drive_call_retry_scheduled",
+        attempt=retry_state.attempt_number,
+        max_attempts=_DRIVE_MAX_ATTEMPTS,
+        next_wait_seconds=round(next_wait, 2),
+        error_type=type(exc).__name__ if exc is not None else None,
+        http_status=status,
+    )
+
+
+@retry(
+    stop=stop_after_attempt(_DRIVE_MAX_ATTEMPTS),
+    wait=wait_exponential_jitter(
+        initial=_DRIVE_BACKOFF_INITIAL_SECONDS, max=_DRIVE_BACKOFF_MAX_SECONDS
+    ),
+    retry=retry_if_exception(_is_transient_drive_error),
+    before_sleep=_log_drive_retry,
+    reraise=True,
+)
+def _invoke_with_drive_retry(action: Any) -> Any:
+    """Run a Drive API `.execute()` action with bounded exponential-backoff retry."""
+    return action()
+
+
+@retry(
+    stop=stop_after_attempt(_DRIVE_MAX_ATTEMPTS),
+    wait=wait_exponential_jitter(
+        initial=_DRIVE_BACKOFF_INITIAL_SECONDS, max=_DRIVE_BACKOFF_MAX_SECONDS
+    ),
+    retry=retry_if_exception(_is_transient_drive_error),
+    before_sleep=_log_drive_retry,
+    reraise=True,
+)
+def _download_media_with_retry(*, service: Any, file_id: str, target: Path) -> None:
+    """Stream Drive media into `target` via `MediaIoBaseDownload`.
+
+    Rebuilds the `get_media` request on each attempt so the underlying
+    `HttpRequest` object never carries state from a failed previous try.
+    Opening `target` in `"wb"` mode inside the retry truncates any bytes
+    written by a prior partial attempt.
+    """
+    request = service.files().get_media(fileId=file_id)
+    with target.open("wb") as fh:
+        downloader = MediaIoBaseDownload(fh, request, chunksize=_DOWNLOAD_CHUNK_SIZE)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
 
 
 class DriveClient:
@@ -78,18 +226,27 @@ class DriveClient:
         return token
 
     def download(self, file_id: str, dest_dir: Path, name: str) -> Path:
-        """Download a Drive file's content to `dest_dir/name`. Returns the path."""
+        """Download a Drive file's content to `dest_dir/name`. Returns the path.
+
+        Streams the file via `MediaIoBaseDownload` in fixed-size chunks so
+        the process memory ceiling is one chunk regardless of file size;
+        the previous `.execute()` path returned the full body as bytes and
+        could OOM (or silently truncate) on large notes.
+
+        Transient failures (429, 5xx, network) are retried at the whole-
+        download level; on retry the file is truncated and re-fetched
+        from byte 0.
+        """
         dest_dir.mkdir(parents=True, exist_ok=True)
         target = dest_dir / name
         try:
-            content = self._service.files().get_media(fileId=file_id).execute()
+            _download_media_with_retry(service=self._service, file_id=file_id, target=target)
         except HttpError as exc:
-            raise DriveClientError(f"files.get_media failed: {exc}") from exc
-        if not isinstance(content, bytes):
-            raise DriveClientError(
-                f"unexpected Drive media response type: {type(content).__name__}"
-            )
-        target.write_bytes(content)
+            raise _drive_error_from_http(exc) from exc
+        except (ServerNotFoundError, ssl.SSLError, TimeoutError, OSError) as exc:
+            raise DriveTransientError(
+                f"Drive transport failure ({type(exc).__name__}): {exc}"
+            ) from exc
         return target
 
     def list_all_notes(self, folder_id: str) -> Iterator[tuple[FileMetadata, str]]:
@@ -118,7 +275,21 @@ class DriveClient:
         pattern: if the delete event is for an old file_id but a new file
         with the same name already exists at the same location, we
         re-point rather than nuke the vault output.
+
+        Rejects non-printable names (NUL, newlines, DEL, Unicode format
+        separators, etc.) — Google's query language quotes strings with
+        `'`, and embedded control chars can inject fragments or truncate
+        the query. Supernote never produces such names, so refusing is
+        safe. `str.isprintable()` treats `""` as printable; that's fine
+        since an empty name here would resolve to a legitimate no-op.
         """
+        if not name.isprintable():
+            _log.warning(
+                "drive_find_live_note_rejected_unsafe_name",
+                reason="control_chars",
+                parent_folder_id=parent_folder_id,
+            )
+            return None
         escaped = name.replace("\\", "\\\\").replace("'", "\\'")
         query = f"name = '{escaped}' and trashed = false and '{parent_folder_id}' in parents"
         raw = self._call(
@@ -153,7 +324,7 @@ class DriveClient:
         except HttpError as exc:
             if getattr(exc, "resp", None) is not None and exc.resp.status == _HTTP_NOT_FOUND:
                 return
-            raise DriveClientError(f"channels.stop failed: {exc}") from exc
+            raise _drive_error_from_http(exc) from exc
 
     def watch_changes(
         self,
@@ -162,20 +333,21 @@ class DriveClient:
         channel_id: str,
         token: str,
         start_page_token: str,
-        ttl_seconds: int,
     ) -> ChannelInfo:
         """Create a push-notification channel for changes.list.
 
-        Google enforces a maximum TTL of 7 days (604800s) on changes
-        channels; requesting more is silently capped.
+        We deliberately do NOT send `expiration` — Google's default is the
+        maximum TTL (7 days), which is exactly what we want, and computing
+        the value locally would depend on the host wall clock (a skewed
+        Docker host would silently request a wrong-length channel). The
+        actual expiry Google assigns is read back from `raw["expiration"]`
+        below and persisted verbatim.
         """
-        expiration_ms = int(time.time() * 1000) + ttl_seconds * 1000
         body = {
             "id": channel_id,
             "type": "web_hook",
             "address": webhook_url,
             "token": token,
-            "expiration": expiration_ms,
         }
         raw = self._call(
             lambda: (
@@ -226,9 +398,15 @@ class DriveClient:
 
     def _list_children(self, folder_id: str) -> Iterator[FileMetadata]:
         page_token: str | None = None
+        # Drive can return the same file id on two consecutive pages if a
+        # concurrent edit shifts pagination ordering mid-walk. Track ids
+        # we've yielded so callers see each child at most once per listing.
+        seen_ids: set[str] = set()
         while True:
-            try:
-                raw = (
+            # Bind page_token via default arg so a retry inside `_call`
+            # re-runs with the same token, not a later loop iteration's.
+            raw = self._call(
+                lambda pt=page_token: (
                     self._service.files()
                     .list(
                         q=f"'{folder_id}' in parents and trashed = false",
@@ -237,26 +415,44 @@ class DriveClient:
                         spaces="drive",
                         supportsAllDrives=False,
                         includeItemsFromAllDrives=False,
-                        pageToken=page_token,
+                        pageToken=pt,
                     )
                     .execute()
                 )
-            except HttpError as exc:
-                raise DriveClientError(f"files.list failed: {exc}") from exc
-            if not isinstance(raw, dict):
-                raise DriveClientError(f"unexpected files.list response type: {type(raw).__name__}")
+            )
             for entry in raw.get("files", []):
-                yield FileMetadata.model_validate(entry)
+                file_metadata = FileMetadata.model_validate(entry)
+                if file_metadata.id in seen_ids:
+                    continue
+                seen_ids.add(file_metadata.id)
+                yield file_metadata
             page_token = raw.get("nextPageToken")
             if not page_token:
                 break
 
     @staticmethod
     def _call(action: Any) -> dict[str, Any]:
+        """Invoke a Drive API `.execute()` with bounded retry + broad transport-error wrapping.
+
+        Retries on transient failures (429, 5xx, socket/SSL/DNS errors)
+        via `_invoke_with_drive_retry`. Permanent HTTP errors (4xx except
+        429) surface after the first attempt as `DrivePermanentError`;
+        exhausted transient errors as `DriveTransientError`. Callers
+        distinguish those so `poll_changes` can log-skip permanent (the
+        resource is gone) while letting transient stall the whole
+        workflow for a DBOS-level retry.
+        """
         try:
-            result = action()
+            result = _invoke_with_drive_retry(action)
         except HttpError as exc:
-            raise DriveClientError(str(exc)) from exc
+            raise _drive_error_from_http(exc) from exc
+        except (ServerNotFoundError, ssl.SSLError, TimeoutError, OSError) as exc:
+            # socket.timeout is TimeoutError on Py3.10+; ConnectionError is
+            # an OSError subclass. `except OSError` catches both, plus the
+            # occasional low-level socket error httplib2 can bubble up.
+            raise DriveTransientError(
+                f"Drive transport failure ({type(exc).__name__}): {exc}"
+            ) from exc
         if not isinstance(result, dict):
             raise DriveClientError(f"unexpected Drive response type: {type(result).__name__}")
         return result

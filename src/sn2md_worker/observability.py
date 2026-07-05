@@ -4,19 +4,17 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Response, status
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.exc import DatabaseError
 from sqlalchemy.orm import Session
 
 from sn2md_worker.config import get_settings
 from sn2md_worker.db import sql_session
 from sn2md_worker.state import conversions, cursor, watch_channels
-from sn2md_worker.state.models import (
-    ConversionRecord,
-    ConversionStatus,
-    DriveChangeCursor,
-    DriveWatchChannel,
-)
+from sn2md_worker.state.conversions import ConversionRecordView
+from sn2md_worker.state.cursor import CursorView
+from sn2md_worker.state.models import ConversionStatus
+from sn2md_worker.state.watch_channels import WatchChannelView
 
 __all__ = ["router"]
 
@@ -106,7 +104,19 @@ async def readyz() -> Response:
     except RuntimeError:
         return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-    if channel is None or channel.expires_at < datetime.now(UTC):
+    if channel is None:
+        return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+    # Belt-and-suspenders vs. tz-naive datetimes: `UTCDateTime` re-attaches
+    # UTC on read, so the row we just loaded is already aware. If a future
+    # schema change ever drops that, comparing against `datetime.now(UTC)`
+    # would raise `TypeError`; normalizing here keeps `/readyz` behaving
+    # (returning 503 for expired) instead of 500-ing.
+    expires = (
+        channel.expires_at
+        if channel.expires_at.tzinfo is not None
+        else channel.expires_at.replace(tzinfo=UTC)
+    )
+    if expires < datetime.now(UTC):
         return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
 
     return Response(status_code=status.HTTP_200_OK)
@@ -147,15 +157,18 @@ def _query_queue_depth(session: Session) -> QueueDepth:
     Reads DBOS's own table via raw SQL — coupling we accept for
     observability. If the table isn't present yet (tests without a full
     DBOS init, or a very early boot), we return the zero default.
+
+    `_TERMINAL_STATUSES` is bound via an expanding parameter rather than
+    f-string interpolation so the query can never grow an injection
+    vector if the constant is ever built from user-controlled input.
     """
-    placeholders = ", ".join(f"'{s}'" for s in _TERMINAL_STATUSES)
     stmt = text(
-        f"SELECT queue_name, COUNT(*) AS cnt FROM workflow_status "  # noqa: S608
-        f"WHERE queue_name IS NOT NULL AND status NOT IN ({placeholders}) "
+        "SELECT queue_name, COUNT(*) AS cnt FROM workflow_status "
+        "WHERE queue_name IS NOT NULL AND status NOT IN :terminal "
         "GROUP BY queue_name"
-    )
+    ).bindparams(bindparam("terminal", expanding=True))
     try:
-        rows = session.execute(stmt).all()
+        rows = session.execute(stmt, {"terminal": list(_TERMINAL_STATUSES)}).all()
     except DatabaseError:
         return QueueDepth()
 
@@ -194,7 +207,7 @@ def _from_epoch_ms(value: int | None) -> datetime | None:
     return datetime.fromtimestamp(value / 1000, tz=UTC)
 
 
-def _to_summary(record: ConversionRecord) -> ConversionSummary:
+def _to_summary(record: ConversionRecordView) -> ConversionSummary:
     return ConversionSummary(
         logical_key=record.logical_key,
         file_id=record.current_file_id,
@@ -205,7 +218,7 @@ def _to_summary(record: ConversionRecord) -> ConversionSummary:
     )
 
 
-def _channel_summary(channel: DriveWatchChannel | None) -> WatchChannelSummary:
+def _channel_summary(channel: WatchChannelView | None) -> WatchChannelSummary:
     if channel is None:
         return WatchChannelSummary(
             channel_id=None, resource_id=None, expires_at=None, is_active=False
@@ -218,7 +231,7 @@ def _channel_summary(channel: DriveWatchChannel | None) -> WatchChannelSummary:
     )
 
 
-def _cursor_summary(record: DriveChangeCursor | None) -> CursorSummary:
+def _cursor_summary(record: CursorView | None) -> CursorSummary:
     if record is None:
         return CursorSummary(page_token=None, last_polled_at=None)
     return CursorSummary(

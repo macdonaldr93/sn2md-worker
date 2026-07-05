@@ -80,7 +80,11 @@ Queues (registered by `workflows.register_queues()` after
 `DBOS.launch()`):
 
 - `convert_queue` — `worker_concurrency=settings.queue.convert_concurrency`
-  (default 2). Serves `convert_note` and `delete_output`.
+  (default 2). Serves `convert_note` only.
+- `delete_queue` — `worker_concurrency=2`. Serves `delete_output` on
+  its own queue so a batch of long conversions can't block the fast
+  filesystem-only deletes (a stale delete arriving mid-backfill
+  completes without waiting).
 - `poll_queue` — `worker_concurrency=1`. Serves `poll_changes` and
   `backfill`.
 

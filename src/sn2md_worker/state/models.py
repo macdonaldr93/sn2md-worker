@@ -2,7 +2,18 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Dialect, Integer, MetaData, String, TypeDecorator
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Dialect,
+    Index,
+    Integer,
+    MetaData,
+    String,
+    TypeDecorator,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 __all__ = [
@@ -86,6 +97,19 @@ class DriveWatchChannel(Base):
     """A push-notification channel we've created against Drive changes.watch."""
 
     __tablename__ = "drive_watch_channels"
+    # Partial unique index enforces "at most one active channel" at the
+    # DB level, so a `mark_active` bug can't silently leave two rows both
+    # `is_active=True`. Indexed rows all match the WHERE predicate; since
+    # the indexed column value is always 1 for those rows, uniqueness
+    # collapses to "at most one row where is_active = 1".
+    __table_args__ = (
+        Index(
+            "uq_drive_watch_channels_active",
+            "is_active",
+            unique=True,
+            sqlite_where=text("is_active = 1"),
+        ),
+    )
 
     channel_id: Mapped[str] = mapped_column(String, primary_key=True)
     resource_id: Mapped[str] = mapped_column(String)
@@ -101,6 +125,11 @@ class DriveChangeCursor(Base):
     """Singleton row tracking the last-seen changes.list page token."""
 
     __tablename__ = "drive_change_cursor"
+    # Only one row allowed; `state/cursor.py` keys everything on `id = 1`.
+    # Applied on fresh installs via `create_all`; existing databases keep
+    # their older schema (no ALTER for CHECK on SQLite) — the recovery
+    # path there is the documented nuke-and-backfill.
+    __table_args__ = (CheckConstraint("id = 1", name="ck_drive_change_cursor_singleton"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     page_token: Mapped[str] = mapped_column(String)

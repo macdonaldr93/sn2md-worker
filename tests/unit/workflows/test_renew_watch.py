@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import Engine, create_engine
@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from sn2md_worker.config import DriveConfig, Settings, WebhookConfig
 from sn2md_worker.db import set_engine
-from sn2md_worker.drive.client import DriveClient
+from sn2md_worker.drive.client import DriveClient, DriveClientError
 from sn2md_worker.drive.models import ChannelInfo
 from sn2md_worker.state import cursor, watch_channels
 from sn2md_worker.state.models import Base
@@ -39,8 +39,23 @@ def engine(tmp_path: Path) -> Iterator[Engine]:
 @pytest.fixture
 def settings() -> Settings:
     return Settings(
-        drive=DriveConfig(source_folder_id="SRC", watch_channel_ttl_days=6),
+        drive=DriveConfig(source_folder_id="SRC"),
         webhook=WebhookConfig(url="https://sn2md.example.com/webhooks/drive"),
+    )
+
+
+@pytest.fixture(autouse=True)
+def stable_channel_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Freeze the channel_id UUID that `_create_and_activate` generates so
+    the pre-persisted pending row and the follow-up `confirm` land on the
+    same predictable value."""
+
+    class _FakeUUID:
+        hex = "new-channel"
+
+    monkeypatch.setattr(
+        "sn2md_worker.workflows.renew_watch.uuid.uuid4",
+        _FakeUUID,
     )
 
 
@@ -71,13 +86,18 @@ class TestWhenNoChannelExists:
         kwargs = drive.watch_changes.call_args.kwargs
         assert kwargs["webhook_url"] == settings.webhook.url
         assert kwargs["start_page_token"] == "SPT-1"
-        assert kwargs["ttl_seconds"] == 6 * 86_400
+        # No ttl_seconds — we let Google pick its max (7 days) rather than
+        # computing expiry from the local wall clock.
+        assert "ttl_seconds" not in kwargs
 
         with Session(engine) as session:
             active = watch_channels.get_active(session)
         assert active is not None
         assert active.channel_id == "new-channel"
-        assert active.token == "server-token"
+        # We now store OUR generated token, not whatever Drive echoes back,
+        # so the DB row matches the token we sent (and the token Drive is
+        # holding on its side).
+        assert active.token == kwargs["token"]
 
     def test_seeds_the_cursor_when_missing(
         self, engine: Engine, settings: Settings, drive: MagicMock
@@ -191,8 +211,6 @@ class TestWhenActiveChannelHasStaleWebhookUrl:
         self, engine: Engine, settings: Settings, drive: MagicMock
     ) -> None:
         # GIVEN
-        from sn2md_worker.drive.client import DriveClientError
-
         with Session(engine) as session, session.begin():
             watch_channels.create(
                 session,
@@ -237,6 +255,65 @@ class TestWhenWebhookUrlIsNotConfigured:
             assert watch_channels.get_active(session) is None
 
 
+class TestWhenDriveWatchChangesFailsMidRenewal:
+    def test_rolls_back_the_pending_row_and_reraises(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — Drive rejects the watch.changes request
+        drive.watch_changes.side_effect = RuntimeError("drive is grumpy")
+
+        # WHEN / THEN — the workflow re-raises...
+        with pytest.raises(RuntimeError, match="grumpy"):
+            renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
+
+        # AND — the pending row does not linger (rolled back)
+        with Session(engine) as session:
+            leftovers = watch_channels.list_all(session)
+        assert leftovers == []
+
+
+class TestWhenRenewalSucceedsRowGoesThroughPendingThenActive:
+    def test_pre_persist_row_is_updated_with_real_drive_values(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — capture the row state right when Drive is called, so we
+        # can prove the pre-persist happened before the HTTP call.
+        captured_channel_id: dict[str, str] = {}
+
+        def capture_pending(**kwargs: object) -> ChannelInfo:
+            captured_channel_id["id"] = str(kwargs["channel_id"])
+            with Session(engine) as sess:
+                rows = watch_channels.list_all(sess)
+            captured_channel_id["pre_persist_count"] = str(len(rows))
+            captured_channel_id["pre_persist_resource_id"] = rows[0].resource_id if rows else ""
+            captured_channel_id["pre_persist_is_active"] = "1" if rows[0].is_active else "0"
+            return ChannelInfo(
+                id="new-channel",
+                resource_id="res-1",
+                expiration=NOW + timedelta(days=7),
+                token="server-token",
+            )
+
+        drive.watch_changes.side_effect = capture_pending
+
+        # WHEN
+        renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
+
+        # THEN — mid-Drive-call there was one row (pending), inactive,
+        # with an empty resource_id (the placeholder).
+        assert captured_channel_id["pre_persist_count"] == "1"
+        assert captured_channel_id["pre_persist_resource_id"] == ""
+        assert captured_channel_id["pre_persist_is_active"] == "0"
+
+        # AND — after Drive succeeds, that same row is now confirmed and active
+        with Session(engine) as session:
+            active = watch_channels.get_active(session)
+        assert active is not None
+        assert active.channel_id == "new-channel"
+        assert active.resource_id == "res-1"
+        assert active.is_active is True
+
+
 class TestEnsureActiveChannel:
     def test_skips_when_drive_client_is_none(self, engine: Engine, settings: Settings) -> None:
         # WHEN
@@ -247,4 +324,74 @@ class TestEnsureActiveChannel:
             assert watch_channels.get_active(session) is None
 
     def test_verifies_headroom_matches_constant(self) -> None:
-        assert timedelta(hours=24) == RENEWAL_HEADROOM
+        assert timedelta(hours=48) == RENEWAL_HEADROOM
+
+
+class TestEnsureActiveChannelWhenPreviousChannelHasExpired:
+    def test_enqueues_a_recovery_poll_and_creates_a_new_channel(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — an active channel whose expires_at is already in the past.
+        # We build one via `watch_channels.create` + `mark_active` so we
+        # don't have to reason about the two-phase renew flow.
+        expired_at = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+        with Session(engine) as session, session.begin():
+            watch_channels.create(
+                session,
+                NewWatchChannel(
+                    channel_id="stale",
+                    resource_id="res-stale",
+                    token="tok-stale",
+                    webhook_url=settings.webhook.url,
+                    expires_at=expired_at,
+                    start_page_token="SPT-STALE",
+                    created_at=expired_at - timedelta(days=8),
+                ),
+            )
+            watch_channels.mark_active(session, "stale")
+
+        # AND — the drive stop-old-channel call is stubbed to succeed
+        drive.stop_channel.return_value = None
+
+        # WHEN
+        with patch("sn2md_worker.workflows.renew_watch.DBOS.enqueue_workflow") as enqueue:
+            ensure_active_channel(drive, settings)
+
+        # THEN — a `poll_changes("recovery")` was enqueued (via the
+        # POLL_QUEUE_NAME queue) to catch up on missed notifications
+        assert enqueue.call_count == 1
+        args, _ = enqueue.call_args
+        assert args[0] == "poll_queue"
+        assert args[2] == "recovery"
+
+        # AND — the normal renewal flow still ran (new channel is active)
+        with Session(engine) as session:
+            active = watch_channels.get_active(session)
+        assert active is not None
+        assert active.channel_id == "new-channel"
+
+    def test_does_not_enqueue_recovery_when_previous_channel_is_still_fresh(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — an active channel that is still valid (expires in 3d)
+        with Session(engine) as session, session.begin():
+            watch_channels.create(
+                session,
+                NewWatchChannel(
+                    channel_id="fresh",
+                    resource_id="res-fresh",
+                    token="tok-fresh",
+                    webhook_url=settings.webhook.url,
+                    expires_at=NOW + timedelta(days=3),
+                    start_page_token="SPT-FRESH",
+                    created_at=NOW - timedelta(days=4),
+                ),
+            )
+            watch_channels.mark_active(session, "fresh")
+
+        # WHEN
+        with patch("sn2md_worker.workflows.renew_watch.DBOS.enqueue_workflow") as enqueue:
+            ensure_active_channel(drive, settings)
+
+        # THEN — no recovery poll enqueued (channel is fresh)
+        enqueue.assert_not_called()
