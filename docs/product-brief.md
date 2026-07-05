@@ -15,9 +15,11 @@ Runs continuously as a Docker container on my Unraid server.
 3. Worker verifies the channel + token, then enqueues a `poll_changes`
    DBOS workflow which walks the `changes.list` cursor and enqueues
    `convert_note` for each affected `.note` file.
-4. `convert_note` downloads the file, runs sn2md against it using Gemini
-   2.5 Pro, and writes the Markdown + assets into a per-note
-   subdirectory that mirrors the Drive layout.
+4. `convert_note` downloads the file, extracts each page's PNG, calls
+   Gemini 2.5 Pro only for pages whose hash has changed since the last
+   conversion (via the `page_conversions` cache table), and writes one
+   Markdown file per page plus an `index.md` under a per-note folder
+   that mirrors the Drive layout.
 5. Destination is a local vault directory on Unraid; an Obsidian instance
    on the same host has that directory open and pushes to Obsidian Sync.
 
@@ -25,8 +27,9 @@ Runs continuously as a Docker container on my Unraid server.
 
 ### Language & tooling
 
-- **Language**: Python 3.11+ (sn2md's floor). Wraps `sn2md` as a library
-  via `sn2md.importer.import_supernote_file_core`.
+- **Language**: Python 3.11+ (sn2md's floor). Drives sn2md's per-page
+  primitives (`NotebookExtractor.extract_images`, `image_to_markdown`)
+  from `conversion/multi_page.py` so we can cache per-page LLM output.
 - **Packaging**: `uv` for venv, dependencies, lockfile, and runners.
 - **Lint/format**: `ruff`.
 - **Type checking**: `mypy`.
@@ -68,11 +71,13 @@ Runs continuously as a Docker container on my Unraid server.
   `convert_note` directly. Table `debounce_state` exists and the runtime
   is wired for it; we'll add the workflow if we observe bad conversions
   from partial files in practice.
-- **Update handling**: overwrite the existing Markdown + assets **only if
-  the source `.note` md5 has changed** since the last successful
-  conversion. Identity for "same note" is the Drive path + filename, not
-  the Drive `fileId` — see technical-brief §4a for why (Supernote's sync
-  replaces the file on every edit).
+- **Update handling**: at the note level, we skip when the source
+  `.note` md5 matches the last successful conversion. Below that, the
+  per-page cache (`page_conversions` table + `page-NN.png` md5) means
+  we only call Gemini for pages whose rendered PNG has changed. Editing
+  the last page of a 20-page notebook costs one Gemini call, not 20.
+  Identity for "same note" is the Drive path + filename, not the
+  `fileId` (see technical-brief §4a).
 - **Deletion handling**: if a `.note` is deleted from Drive, delete the
   corresponding Markdown + assets from the vault (mirror source). Delete
   workflow first confirms no live file with the same logical key still
@@ -90,15 +95,17 @@ Runs continuously as a Docker container on my Unraid server.
 ### LLM / sn2md
 
 - **Model**: `gemini/gemini-2.5-pro` (via `llm-gemini` plugin ≥0.32).
-- **Prompt**: sn2md's default (documented as working well with Gemini).
-- **Confirmed**: sn2md delegates all LLM calls to the
-  [`llm`](https://llm.datasette.io) library. `llm-gemini` is a supported
-  plugin — installed alongside sn2md in the container, API key via
-  `LLM_GEMINI_KEY` env var (or sn2md's `api_key` config field).
-- **Integration surface**: sn2md exposes `import_supernote_file_core` in
-  `sn2md.importer` — usable as a Python library. CLI fallback also available
-  (`sn2md file <path>`). Library path preferred; simpler to inject config
-  and capture errors.
+- **Prompt**: sn2md's default `TO_MARKDOWN_TEMPLATE` (works well with
+  Gemini per sn2md's own guidance).
+- **API key**: `LLM_GEMINI_KEY` env var, or `sn2md.api_key` in config.
+  `_resolve_gemini_key` in `workflows/convert_note.py` prefers the
+  config value, falls back to the env var, raises if neither is set.
+- **Integration surface**: we drive sn2md's per-page primitives —
+  `NotebookExtractor.extract_images` renders each page to PNG,
+  `sn2md.ai_utils.image_to_markdown` calls Gemini for one page at a
+  time. This lets us cache per-page LLM output on hash, which
+  `import_supernote_file_core` (sn2md's single-file wrapper) doesn't
+  support.
 
 ### Queue & durability
 
@@ -120,12 +127,20 @@ Runs continuously as a Docker container on my Unraid server.
 
 ### Output layout
 
-- **Folder structure**: mirror the source Drive folder layout exactly under
-  the destination vault path.
-  - `Source/Notebooks/Journal/2026-07.note`
-    → `<vault>/Notebooks/Journal/2026-07.md`
-- **Assets/images**: use sn2md's default asset placement; revisit only if
-  it's awkward inside the vault.
+- **Folder per note**, mirroring the source Drive layout, with one
+  Markdown file per page plus an `index.md` that links them via
+  Obsidian wikilinks:
+  - `Source/Notebooks/Journal/2026-07.note` →
+    ```
+    <vault>/Notebooks/Journal/2026-07/
+    ├── index.md         # [[page-01]], [[page-02]], ...
+    ├── page-01.md
+    ├── page-01.png
+    ├── page-02.md
+    └── page-02.png
+    ```
+- **Assets**: one PNG next to each page's `.md`. Simplest layout for
+  Obsidian's relative-image resolution.
 
 ### Deployment
 
@@ -150,9 +165,9 @@ Runs continuously as a Docker container on my Unraid server.
   200 iff an active Drive watch channel exists and hasn't expired, or
   the worker is in dev mode with no webhook URL configured).
 - **Status endpoint**: `GET /status` returns JSON with recent
-  conversions, recent failures, active watch channel + expiry, and
-  Drive changes cursor. `queue_depth` and `backfill.state` fields are
-  spec'd but not yet populated.
+  conversions, recent failures, active watch channel + expiry, Drive
+  changes cursor, in-flight `queue_depth` per DBOS queue, and the
+  latest `backfill` workflow's outcome.
 - **Logs**: structured JSON to stdout via `structlog`. Every workflow
   emits `_started` / `_succeeded` / `_failed` / `_skipped (reason=…)`
   events. Failures include a stringified exception plus the full
@@ -162,12 +177,12 @@ Runs continuously as a Docker container on my Unraid server.
 
 ### Testing
 
-- **Unit tests** (`tests/unit/`): 90 tests, in-memory SQLite. BDD
+- **Unit tests** (`tests/unit/`): 111 tests, in-memory SQLite. BDD
   scenario classes for behavior (workflows, webhook, repos); plain
   functions for pure logic (path helpers, model alias mapping,
   TypeDecorator).
-- **Fake externals via MagicMock**: `DriveClient`, `sn2md.import_supernote_file_core`,
-  and `DBOS.enqueue_workflow` are patched at the call boundary.
+- **Fake externals via MagicMock and `patch`**: `DriveClient`,
+  `run_multi_page`, and `DBOS.enqueue_workflow` at the call boundary.
 - **No live-API tests in CI** — verify manually against a scratch
   Drive folder via `scripts/verify/`.
 
@@ -179,41 +194,23 @@ Runs continuously as a Docker container on my Unraid server.
 - Failure notifications beyond logs.
 - Any UI beyond `/status` JSON.
 
-## Research findings (resolved 2026-07-04)
+## Verifications (all resolved)
 
-1. **sn2md + Gemini**: ✅ Native support via the `llm` library abstraction
-   plus the `llm-gemini` plugin (v0.32, May 2026). Model string:
-   `gemini/gemini-2.5-pro`. sn2md is usable as a library
-   (`sn2md.importer.import_supernote_file_core`). Details in the technical
-   brief.
-2. **DBOS + SQLite**: ✅ Supported. `use_listen_notify=False` required.
-   Postgres is the docs-recommended production path — accepting SQLite as a
-   tradeoff for zero-infrastructure single-node deployment. Verified via
-   `docs.dbos.dev/python/reference/configuration`.
-3. **Drive `changes.watch` TTL**: ✅ 7 days max (604800s), no automatic
-   renewal — worker must create a new channel with a new `id` before
-   expiry.
-4. **Service account access to personal Drive**: ✅ Personal user can share
-   a folder to the service account's `client_email`; the account then sees
-   the folder like any other collaborator. No Domain-Wide Delegation
-   needed. **Load-bearing verification task** (moved to open items below).
-
-## Verifications (resolved)
-
-- **Service-account changes feed on a personal user's shared folder** —
-  ✅ Verified 2026-07-04 via `scripts/verify/01_drive_access.py`.
-  Personal-user edits on shared files DO appear in the service
-  account's `changes.list` feed. Bonus finding: Supernote's device-sync
-  flow replaces the Drive file (new `fileId`) rather than updating in
-  place; design implications captured in technical-brief §4a and
-  reflected in the workflow contracts.
-- **sn2md + Gemini end-to-end** — ✅ Verified 2026-07-04. Model string
-  is `gemini/gemini-2.5-pro` (prefixed form required by llm-gemini).
-  Baseline ~7.5s per single-page mostly-drawing note against Gemini 2.5
-  Pro.
-- **DBOS runtime shape in Docker** — ✅ Runs as an embedded library
-  inside a single Python process; container smoke-tested end-to-end
-  (`docker compose up`, `/healthz` responds, workflows execute, SQLite
-  state persists).
-- **Multi-arch image publish** — pending first push to GitHub with the
-  release workflow in place.
+1. **Service-account changes feed on a personal user's shared folder** —
+   verified 2026-07-04 via `scripts/verify/01_drive_access.py`.
+   Personal-user edits on shared files appear in the service account's
+   `changes.list` feed. Bonus finding: Supernote's device-sync flow
+   replaces the Drive file (new `fileId`) rather than updating in
+   place — reflected in tech-brief §4a.
+2. **sn2md + Gemini end-to-end** — verified 2026-07-04. Model string
+   `gemini/gemini-2.5-pro` (prefixed form required by llm-gemini
+   ≥0.32). Baseline ~7.5s per page against Gemini 2.5 Pro.
+3. **DBOS + SQLite** — supported with `use_listen_notify=False`.
+   Postgres is DBOS's recommended production backend; SQLite is our
+   zero-infrastructure tradeoff. Runs as an embedded library inside a
+   single Python process; container smoke-tested end-to-end.
+4. **Drive `changes.watch` TTL** — 7 days max, no automatic renewal.
+   Worker creates a fresh channel on TTL headroom or URL change.
+5. **Live conversion** — verified via ngrok deploy: Supernote edit →
+   Drive push → `poll_changes` → `convert_note` → `page-NN.md` in the
+   vault. Multi-arch image publish pending first push to GitHub.

@@ -2,15 +2,15 @@
 
 [![CI](https://github.com/macdonaldr93/sn2md-worker/actions/workflows/ci.yml/badge.svg)](https://github.com/macdonaldr93/sn2md-worker/actions/workflows/ci.yml)
 
-A background worker that watches a Google Drive folder for Supernote `.note`
-files, converts them to Markdown with [`sn2md`](https://github.com/dsummersl/sn2md)
-using Gemini 2.5 Pro, and drops the results into an Obsidian vault. Runs as
-a single Docker container (linuxserver-style PUID/PGID) on a home server —
-built for Unraid but should work anywhere Docker does.
+Watches a Google Drive folder for Supernote `.note` files, transcribes
+each page with Gemini 2.5 Pro, and writes the results into an Obsidian
+vault. Runs as a Docker container (linuxserver-style PUID/PGID), built
+for Unraid but works anywhere Docker does.
 
 - Product context — [`docs/product-brief.md`](docs/product-brief.md)
 - Implementation design — [`docs/technical-brief.md`](docs/technical-brief.md)
-- Verification scripts (M0 gates) — [`scripts/verify/README.md`](scripts/verify/README.md)
+- Contributor knowledge — [`CLAUDE.md`](CLAUDE.md) (start here if you're
+  landing on this repo cold)
 
 ## How it works
 
@@ -35,83 +35,140 @@ Supernote ─sync→ Google Drive ─push notification→ /webhooks/drive
                           Obsidian Sync → phones, laptop
 ```
 
-Full architecture and workflow contracts in the technical brief.
+Each note becomes a folder with one Markdown file per page and an
+`index.md` that links them. A page whose PNG hash matches the last
+conversion skips Gemini — edit only the last page and only the last
+page re-transcribes.
 
-## Quickstart
+## Getting started (development)
 
-### 1. Prerequisites (one-time)
+### Prerequisites
 
-1. **GCP project + service account**
-   - Create a GCP project, enable the Google Drive API.
-   - Create a service account, download the JSON key.
-   - Note the `client_email` from the JSON.
-2. **Share the Drive folder** with the service account's email address as
-   Viewer.
-3. **Gemini API key** from [Google AI Studio](https://ai.google.dev).
-4. **Public HTTPS URL** — route it through your reverse proxy (Cloudflare
-   Tunnel, Nginx Proxy Manager, Traefik) to the container's port 8080,
-   path `/webhooks/drive`.
+- Docker + Docker Compose (Desktop is fine on macOS / Windows).
+- [`uv`](https://docs.astral.sh/uv/) 0.5+ for local iteration outside
+  the container.
+- A Gemini API key and a Google Cloud service account JSON (see
+  [`docs/technical-brief.md#11-prerequisites`](docs/technical-brief.md)
+  for the click-through). For local live testing, ngrok gives you a
+  public HTTPS URL the Drive push channel can hit — but you can also
+  do all of development without ngrok since `backfill` at startup
+  triggers the same conversion path.
 
-Optional but recommended: run the two verification scripts in
-[`scripts/verify/`](scripts/verify/README.md) before you deploy, to prove
-the service account can see the folder's change feed and that sn2md can
-transcribe a note via your Gemini key. Both scripts are self-contained
-(`uv run scripts/verify/...`).
-
-### 2. Deploy
-
-Two options.
-
-**From the published image** (recommended for Unraid — pulls the multi-arch
-image from GitHub Container Registry, no local build):
-
-```sh
-docker pull ghcr.io/macdonaldr93/sn2md-worker:latest
-```
-
-Then adapt the `image:` line in your `docker-compose.yml` to
-`ghcr.io/macdonaldr93/sn2md-worker:latest` and skip the `build:` block.
-Available platforms: `linux/amd64`, `linux/arm64`.
-
-**From source** (local build):
+### Clone, install, run the tests
 
 ```sh
 git clone https://github.com/macdonaldr93/sn2md-worker.git
 cd sn2md-worker
 
-cp .env.example .env
-$EDITOR .env
-
-# Put the service account JSON here — .gitignore already excludes it.
-mkdir -p secrets && cp /path/to/sa.json secrets/service-account.json
-
-docker compose up -d --build
+uv sync                        # installs deps + the local package into .venv
+uv run pytest                  # 111 tests, in-memory SQLite, no network
+uv run pre-commit install      # ruff + mypy + hygiene on every commit
 ```
 
-`docker compose logs -f sn2md-worker` will show the structured JSON output.
-
-### 3. Verify
+### Boot locally (no Docker)
 
 ```sh
-curl http://localhost:8080/healthz     # liveness
-curl http://localhost:8080/readyz      # 200 iff an active Drive watch exists
-curl http://localhost:8080/status      # recent conversions, watch channel, cursor
+cp .env.example .env
+$EDITOR .env                   # LLM_GEMINI_KEY, DRIVE__SOURCE_FOLDER_ID (webhook URL can stay empty)
+
+mkdir -p secrets
+cp /path/to/service-account.json secrets/service-account.json
+
+uv run sn2md-worker            # http://localhost:8080
 ```
 
-The first startup enqueues a `backfill` that walks the source folder tree
-and enqueues `convert_note` for every `.note` not yet in the vault.
-Subsequent edits arrive via Drive push notifications.
+`/healthz`, `/readyz`, and `/status` are on 8080. With `WEBHOOK__URL`
+empty the worker skips channel creation but still runs `backfill` at
+startup, so you can iterate on the conversion path without any public
+routing.
+
+### Boot in Docker
+
+The same `.env` and `secrets/` layout drives the container.
+
+```sh
+mkdir -p vault                 # gitignored; where output lands
+docker compose up --build      # rebuild + attach logs
+
+docker compose up -d --build   # detached
+docker compose logs -f sn2md-worker | jq .   # structured JSON — jq is handy
+```
+
+Volumes bind by default to `./data`, `./vault`, `./secrets`. Override
+via `DATA_DIR`, `VAULT_DIR`, `SECRETS_DIR` in `.env` if you want
+different paths.
+
+The image is linuxserver-style: `PUID`, `PGID`, `TZ`, `UMASK` in `.env`
+control the runtime user. Set `PUID`/`PGID` to match your host UID so
+files under `vault/` land with the right ownership.
+
+### Testing live with ngrok
+
+Drive push notifications need a publicly-trusted HTTPS URL. ngrok is
+the quickest local option:
+
+```sh
+# terminal 1
+ngrok http 8080                # note the https://<subdomain>.ngrok-free.app
+
+# terminal 2 — set the webhook URL in .env, then bring the container up
+# SN2MD_WORKER__WEBHOOK__URL=https://<subdomain>.ngrok-free.app/webhooks/drive
+docker compose up --build -d
+```
+
+Look for `renew_watch_channel_created` in the logs. When you edit a
+note on the Supernote and it syncs to Drive, you should see
+`drive_webhook_notification` → `poll_changes_enqueued` →
+`convert_note_started` → `convert_note_succeeded pages=N cache_hits=N-1`.
+
+If you restart ngrok you'll get a new URL — update `.env` and
+`docker compose restart`. The worker detects the URL change, stops the
+old Drive channel, and creates a fresh one. No SQLite nuke required.
+
+### Iterating
+
+- **Code changes**: `uv run sn2md-worker` (or `docker compose up
+  --build`) — no watcher yet.
+- **Config changes**: env-var overrides (`SN2MD_WORKER__SECTION__KEY`)
+  win over `config.toml`, always. Simplest is to edit `.env` and
+  restart.
+- **State reset**: `rm -rf data/sn2md-worker.sqlite` — startup
+  `backfill` re-populates from Drive.
+- **Vault reset**: `rm -rf vault/` — same idea; conversions will
+  re-run.
+- **Pre-commit hooks**: ruff auto-fixes on commit. If a hook rewrites
+  a file, re-stage and commit again.
+
+## Deploying
+
+### From the published image (Unraid, headless servers)
+
+```sh
+docker pull ghcr.io/macdonaldr93/sn2md-worker:latest
+```
+
+Adapt the `image:` line in your `docker-compose.yml` to point at
+`ghcr.io/macdonaldr93/sn2md-worker:latest` and drop the `build:`
+block. Multi-arch: `linux/amd64` + `linux/arm64`.
+
+### From source
+
+Same three steps as local Docker above, but on the server. Wire your
+reverse proxy so
+`https://sn2md.<yourdomain>/webhooks/drive` reaches the container's
+port 8080. Only expose `/webhooks/drive` publicly — `/status`,
+`/healthz`, `/readyz` should be LAN-only or behind reverse-proxy auth.
 
 ## Configuration
 
 Two overlapping surfaces:
 
-- **`config.toml`** — file-based defaults. See
-  [`config.example.toml`](config.example.toml). Optional; the container
-  boots without one.
+- **`config.toml`** — file-based defaults (see
+  [`config.example.toml`](config.example.toml)). Optional; the
+  container's baked-in env vars mean it boots without one.
 - **Environment variables** — `SN2MD_WORKER__SECTION__KEY` (double
-  underscore for nesting) always overrides the file. This is the
-  recommended surface for the docker-compose deployment.
+  underscore for nesting) always wins. This is the recommended surface
+  for Docker deployments.
 
 ### Required env vars
 
@@ -119,62 +176,38 @@ Two overlapping surfaces:
 |---|---|
 | `LLM_GEMINI_KEY` | Gemini API key for the `llm-gemini` plugin |
 | `SN2MD_WORKER__DRIVE__SOURCE_FOLDER_ID` | Drive folder ID the Supernote syncs into |
-| `SN2MD_WORKER__WEBHOOK__URL` | Public HTTPS URL for Drive push notifications |
+| `SN2MD_WORKER__WEBHOOK__URL` | Public HTTPS URL for Drive push (skip in dev; backfill covers you) |
 
 ### linuxserver-style user / group
 
 | Env var | Default | Notes |
 |---|---|---|
-| `PUID` | `1000` | Set to match your host user for correct file ownership under `/vault` |
-| `PGID` | `1000` | Same |
+| `PUID` | `1000` | Match your host UID for correct file ownership under `/vault` |
+| `PGID` | `1000` |  |
 | `TZ` | `Etc/UTC` | IANA timezone (e.g. `America/Toronto`) |
-| `UMASK` | `022` | Standard permission mask for new files |
-| `CHOWN_ON_START` | `true` | Set `false` to skip the startup chown pass on very large vaults |
+| `UMASK` | `022` |  |
+| `CHOWN_ON_START` | `true` | `false` skips the startup chown on huge vaults |
 
 ### Volumes
 
 | Container path | Purpose |
 |---|---|
-| `/data` | DBOS + application SQLite state (must be writable) |
-| `/vault` | Obsidian vault directory (must be writable) |
-| `/secrets/service-account.json` | Google service account JSON key (read-only) |
-
-## Local development
-
-```sh
-uv sync                # deps + local package
-uv run sn2md-worker    # boots on :8080
-uv run pytest          # ~90 tests, in-memory SQLite
-```
-
-Pre-commit is wired up:
-
-```sh
-uv run pre-commit install
-```
-
-That runs ruff (check + format), mypy, and standard hygiene hooks on every
-commit. CI runs the same set on push/PR.
-
-### Overriding config locally
-
-For development without editing `config.toml`, drop a `.env` in the repo
-root (git-ignored) and set what you need. For the built-in run — not the
-container — you'll typically want:
-
-```sh
-SN2MD_WORKER__GOOGLE__APPLICATION_CREDENTIALS=./secrets/service-account.json
-SN2MD_WORKER__DRIVE__SOURCE_FOLDER_ID=<your-folder-id>
-SN2MD_WORKER__VAULT__ROOT_PATH=/tmp/sn2md-vault
-LLM_GEMINI_KEY=<your-key>
-```
+| `/data` | DBOS + application SQLite state (writable) |
+| `/vault` | Obsidian vault directory (writable) |
+| `/secrets/service-account.json` | Google service account JSON (read-only) |
 
 ## Status
 
-Milestone status per [tech brief §17](docs/technical-brief.md):
-
-- ✅ M0 — verification scripts, service-account changes feed + sn2md-Gemini both proven
-- ✅ M1 — FastAPI + DBOS + health endpoints + webhook route + Drive client
-- ✅ M2 — conversion path (`convert_note`, sn2md runner, path helpers, state schema)
-- ✅ M3 — `poll_changes`, `renew_watch_channel`, `delete_output`, `backfill`, cursor + token verification
-- ⚙️ M4 — `/status` ✅, Docker + compose ✅, CI ✅; BDD test refactor and structured-log audit still pending
+- ✅ M0 — verification scripts, service-account changes feed +
+  sn2md/Gemini proven end-to-end.
+- ✅ M1 — FastAPI + DBOS + health endpoints + Drive client +
+  authenticated `/webhooks/drive`.
+- ✅ M2 — conversion path with per-page caching (one `page-NN.md` per
+  page + `index.md`).
+- ✅ M3 — `poll_changes`, `renew_watch_channel` (auto-renews on URL
+  change), `delete_output`, `backfill`.
+- ✅ M4 — `/status` (with `queue_depth` + `backfill`), real
+  `/readyz`, Docker image, CI, multi-arch release workflow,
+  structured logs with correlation IDs.
+- 🚧 Remaining polish tracked in
+  [`docs/technical-brief.md#17-milestones`](docs/technical-brief.md).

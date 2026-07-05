@@ -1,6 +1,6 @@
 # CLAUDE.md — tests/unit
 
-90 unit tests, in-memory SQLite. Directory structure mirrors
+111 unit tests, in-memory SQLite. Directory structure mirrors
 `src/sn2md_worker/`.
 
 ## When to use BDD vs plain functions
@@ -49,7 +49,7 @@ input/output check with no scenario framing.
 Patch at the workflow module boundary, not the source:
 
 ```python
-with patch("sn2md_worker.workflows.convert_note.run_sn2md") as fake_run:
+with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
     convert_note_impl(...)
 ```
 

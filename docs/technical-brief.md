@@ -534,8 +534,8 @@ layout. Sections:
   workflow)
 - `[vault]` — `root_path`, `mirror_source_layout`
 - `[sn2md]` — `model` (default `gemini/gemini-2.5-pro`), `api_key`
-  (SecretStr, optional; falls back to `LLM_GEMINI_KEY` env in `sn2md`
-  itself)
+  (SecretStr, optional). `workflows.convert_note._resolve_gemini_key`
+  prefers this then falls back to the `LLM_GEMINI_KEY` env var.
 - `[queue]` — `convert_concurrency` (default 2)
 - `[observability]` — `log_level`, `status_endpoint_enabled`
 - `[database]` — `url` (single SQLite/Postgres URL; DBOS + app tables
@@ -651,12 +651,13 @@ LAN-only or behind reverse-proxy auth.
 
 | Scenario                                     | Recovery                                         |
 |----------------------------------------------|--------------------------------------------------|
-| Webhook missed (network glitch)              | Fallback `poll_changes` cron catches up          |
+| Webhook missed (network glitch)              | Next container restart runs `backfill`, picks up whatever changed. Fallback `poll_changes` cron is deferred (see §5.2). |
 | Container restart mid-conversion             | DBOS resumes workflow from last step             |
-| Watch channel expires without renewal        | Next fallback poll runs; renew workflow makes a fresh channel; cursor preserves continuity |
-| Gemini rate limit hit                        | Queue `limiter` throttles; convert workflows retry via DBOS step retries |
+| Watch channel expires without renewal        | Daily `renew_watch_channel` cron creates a fresh channel; cursor preserves continuity between old and new channel |
+| Webhook URL changed (ngrok, DNS)             | `renew_watch_channel_impl` sees `webhook_url != settings.webhook.url` on next fire, calls `drive.stop_channel` on the old channel, creates a new one |
+| Gemini failure / rate limit                  | `convert_note_failed` recorded; DBOS marks workflow ERROR; next `backfill` retries (idempotent via `page_conversions` cache — completed pages skipped) |
 | Malformed `.note`                            | sn2md raises; workflow terminates with ERROR; log + record status; do not retry |
-| Drive quota / auth error                     | Workflow raises; log + retry with backoff (step-level) |
+| Drive quota / auth error                     | Workflow raises; log; next scheduled or manual retry |
 | SQLite locked / corrupted                    | Container fails healthcheck; user restores from backup of `/data` |
 
 ## 14. Observability
@@ -703,8 +704,8 @@ consistent across the codebase):
   `exception` field), re-raised so DBOS records ERROR status.
 - `<workflow>_skipped` — INFO or WARNING, always with a `reason=` field.
 - Intermediate events (e.g. `poll_changes_enqueued`,
-  `convert_note_running_sn2md`, `renew_watch_channel_created`) include
-  concrete context on each.
+  `convert_note_running_multi_page`, `renew_watch_channel_created`)
+  include concrete context on each.
 
 Log levels: INFO for happy path, WARNING for graceful degradation
 (config missing, safety guard tripped), ERROR for failures.
@@ -734,7 +735,7 @@ originating `request_id` is a future addition.
 
 ## 15. Testing strategy
 
-**90 unit tests**, in-memory SQLite. All tests live under
+**111 unit tests**, in-memory SQLite. All tests live under
 `tests/unit/` mirroring the source layout (per-project convention).
 Two shapes:
 
@@ -749,7 +750,9 @@ Two shapes:
 External dependencies are patched at the call boundary:
 - `DriveClient` — `MagicMock(spec=DriveClient)`, per-method return
   values / side effects.
-- `sn2md.import_supernote_file_core` — `patch(...)` at the runner.
+- `run_multi_page` — `patch("sn2md_worker.workflows.convert_note.run_multi_page")`
+  in the workflow tests. `test_multi_page.py` patches sn2md's
+  `NotebookExtractor.extract_images` and `image_to_markdown` directly.
 - `DBOS.enqueue_workflow` — `patch(...)` in the workflow module.
 
 No `respx`, no live-API tests in CI. Manual verification against real
@@ -780,8 +783,9 @@ Drive + Gemini is via `scripts/verify/`.
 - **M0** — ✅ Verification scripts, both gates passed (see §16).
 - **M1** — ✅ FastAPI + DBOS + health endpoints + Drive client +
   `/webhooks/drive` route with authentication.
-- **M2** — ✅ Conversion path: `convert_note` + `run_sn2md` +
-  `conversion/paths.py` + state schema + DBOS singletons wired.
+- **M2** — ✅ Conversion path: `convert_note` + per-page cached runner
+  (`conversion/multi_page.py`) + path helpers + state schema
+  (`conversion_records` + `page_conversions`) + DBOS singletons wired.
   `debounce_file` deferred (see §5.3).
 - **M3** — ✅ `poll_changes`, `renew_watch_channel`, `delete_output`,
   `backfill`. Cursor lifecycle + token verification in place.
@@ -791,8 +795,11 @@ Drive + Gemini is via `scripts/verify/`.
 
 ### Remaining polish (not blocking)
 
-- `/status` `queue_depth` + `backfill.state` fields.
 - Multi-arch image published (needs a push to GitHub with the release
-  workflow).
-- First live end-to-end run against real Unraid + iterate on whatever
-  surfaces.
+  workflow in place).
+- Hash-first page cache — v1 keys on `(logical_key, page_index)`, so
+  a page inserted mid-note re-runs downstream pages through Gemini.
+- Correlation id propagation across the DBOS enqueue boundary
+  (webhook → poll_changes worker → convert_note worker). Today those
+  cross with `file_id` / `logical_key`, not with the originating
+  `request_id`.
