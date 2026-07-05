@@ -9,9 +9,10 @@ from dbos import DBOS
 
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.db import sql_session
-from sn2md_worker.drive.client import DriveClient, get_drive_client
+from sn2md_worker.drive.client import DriveClient, DriveClientError, get_drive_client
 from sn2md_worker.logging import get_logger
 from sn2md_worker.state import cursor, watch_channels
+from sn2md_worker.state.models import DriveWatchChannel
 from sn2md_worker.state.watch_channels import NewWatchChannel
 
 __all__ = [
@@ -44,7 +45,10 @@ def renew_watch_channel_impl(
     settings: Settings,
     now: datetime,
 ) -> None:
-    """Idempotent renewal check: create a new channel if none active or ≤24h left."""
+    """Idempotent renewal check: create a new channel if none active,
+    the current one expires within `RENEWAL_HEADROOM`, or it is
+    registered to a URL that no longer matches settings.
+    """
     with structlog.contextvars.bound_contextvars(
         workflow="renew_watch_channel", trigger=trigger_source
     ):
@@ -56,14 +60,26 @@ def renew_watch_channel_impl(
 
             with sql_session() as session:
                 active = watch_channels.get_active(session)
-            if active is not None and (active.expires_at - now) > RENEWAL_HEADROOM:
-                _log.info(
-                    "renew_watch_skipped",
-                    reason="still_fresh",
-                    channel_id=active.channel_id,
-                    expires_at=active.expires_at.isoformat(),
-                )
-                return
+
+            if active is not None:
+                url_matches = active.webhook_url == settings.webhook.url
+                still_fresh = (active.expires_at - now) > RENEWAL_HEADROOM
+                if url_matches and still_fresh:
+                    _log.info(
+                        "renew_watch_skipped",
+                        reason="still_fresh",
+                        channel_id=active.channel_id,
+                        expires_at=active.expires_at.isoformat(),
+                    )
+                    return
+                if not url_matches:
+                    _log.info(
+                        "renew_watch_url_changed",
+                        channel_id=active.channel_id,
+                        old_url=active.webhook_url or "<unknown>",
+                        new_url=settings.webhook.url,
+                    )
+                _try_stop_channel(drive=drive, active=active)
 
             _create_and_activate(drive=drive, settings=settings, now=now, trigger=trigger_source)
             _log.info("renew_watch_succeeded")
@@ -83,6 +99,20 @@ def ensure_active_channel(drive: DriveClient | None, settings: Settings) -> None
         settings=settings,
         now=datetime.now(UTC),
     )
+
+
+def _try_stop_channel(*, drive: DriveClient, active: DriveWatchChannel) -> None:
+    """Best-effort — tell Drive to stop the old channel so it doesn't
+    keep hitting a stale URL. Failures are logged, not fatal."""
+    try:
+        drive.stop_channel(active.channel_id, active.resource_id)
+        _log.info("renew_watch_channel_stopped", channel_id=active.channel_id)
+    except DriveClientError as exc:
+        _log.warning(
+            "renew_watch_channel_stop_failed",
+            channel_id=active.channel_id,
+            error=str(exc),
+        )
 
 
 def _create_and_activate(
@@ -108,6 +138,7 @@ def _create_and_activate(
                 channel_id=info.id,
                 resource_id=info.resource_id,
                 token=info.token,
+                webhook_url=settings.webhook.url,
                 expires_at=info.expiration,
                 start_page_token=page_token,
                 created_at=now,

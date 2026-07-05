@@ -28,6 +28,10 @@ service-account.json
 /secrets/
 /*.json
 !/config.example.toml
+# Local vault mount for docker-compose testing.
+/vault/
+# Scratch notes.
+/.ideas/
 
 # Editor
 .vscode/

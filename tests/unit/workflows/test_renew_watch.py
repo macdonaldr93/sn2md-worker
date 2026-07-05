@@ -104,6 +104,7 @@ class TestWhenActiveChannelIsExpiringSoon:
                     channel_id="stale",
                     resource_id="res-stale",
                     token="stale-token",
+                    webhook_url=settings.webhook.url,
                     expires_at=NOW + timedelta(hours=12),
                     start_page_token="SPT-OLD",
                     created_at=NOW - timedelta(days=6),
@@ -134,6 +135,7 @@ class TestWhenActiveChannelIsFresh:
                     channel_id="fresh",
                     resource_id="res-fresh",
                     token="fresh-token",
+                    webhook_url=settings.webhook.url,
                     expires_at=NOW + timedelta(days=5),
                     start_page_token="SPT-CUR",
                     created_at=NOW - timedelta(days=1),
@@ -150,6 +152,72 @@ class TestWhenActiveChannelIsFresh:
             active = watch_channels.get_active(session)
         assert active is not None
         assert active.channel_id == "fresh"
+
+
+class TestWhenActiveChannelHasStaleWebhookUrl:
+    def test_stops_the_old_channel_and_creates_a_new_one(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — an active channel registered with a DIFFERENT webhook URL,
+        # otherwise still well within its TTL.
+        with Session(engine) as session, session.begin():
+            watch_channels.create(
+                session,
+                NewWatchChannel(
+                    channel_id="stale-url",
+                    resource_id="res-old",
+                    token="old-token",
+                    webhook_url="https://old-ngrok.example.com/webhooks/drive",
+                    expires_at=NOW + timedelta(days=5),
+                    start_page_token="SPT-OLD",
+                    created_at=NOW - timedelta(days=1),
+                ),
+            )
+            watch_channels.mark_active(session, "stale-url")
+
+        # WHEN — the settings now point at a new URL
+        renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
+
+        # THEN — Drive is asked to stop the old channel and a new one is created
+        drive.stop_channel.assert_called_once_with("stale-url", "res-old")
+        drive.watch_changes.assert_called_once()
+        with Session(engine) as session:
+            active = watch_channels.get_active(session)
+        assert active is not None
+        assert active.channel_id == "new-channel"
+        assert active.webhook_url == settings.webhook.url
+
+    def test_survives_a_drive_stop_failure_and_still_renews(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN
+        from sn2md_worker.drive.client import DriveClientError
+
+        with Session(engine) as session, session.begin():
+            watch_channels.create(
+                session,
+                NewWatchChannel(
+                    channel_id="stale-url",
+                    resource_id="res-old",
+                    token="old-token",
+                    webhook_url="https://old-ngrok.example.com/webhooks/drive",
+                    expires_at=NOW + timedelta(days=5),
+                    start_page_token="SPT-OLD",
+                    created_at=NOW - timedelta(days=1),
+                ),
+            )
+            watch_channels.mark_active(session, "stale-url")
+        drive.stop_channel.side_effect = DriveClientError("channels.stop failed")
+
+        # WHEN
+        renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
+
+        # THEN — the failure was swallowed, the new channel was still created
+        drive.watch_changes.assert_called_once()
+        with Session(engine) as session:
+            active = watch_channels.get_active(session)
+        assert active is not None
+        assert active.channel_id == "new-channel"
 
 
 class TestWhenWebhookUrlIsNotConfigured:

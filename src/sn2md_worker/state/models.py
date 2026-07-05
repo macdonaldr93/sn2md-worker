@@ -89,6 +89,7 @@ class DriveWatchChannel(Base):
     channel_id: Mapped[str] = mapped_column(String, primary_key=True)
     resource_id: Mapped[str] = mapped_column(String)
     token: Mapped[str] = mapped_column(String)
+    webhook_url: Mapped[str | None] = mapped_column(String, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
     start_page_token: Mapped[str] = mapped_column(String)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime())

@@ -41,6 +41,7 @@ def registered_channel(engine: Engine) -> None:
                 channel_id=CHANNEL_ID,
                 resource_id="res-1",
                 token=CHANNEL_TOKEN,
+                webhook_url="https://example.com/webhooks/drive",
                 expires_at=now + timedelta(days=6),
                 start_page_token="1",
                 created_at=now,

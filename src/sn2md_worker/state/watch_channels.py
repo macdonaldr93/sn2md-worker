@@ -22,6 +22,7 @@ class NewWatchChannel:
     channel_id: str
     resource_id: str
     token: str
+    webhook_url: str
     expires_at: datetime
     start_page_token: str
     created_at: datetime
@@ -32,6 +33,7 @@ def create(session: Session, data: NewWatchChannel) -> DriveWatchChannel:
         channel_id=data.channel_id,
         resource_id=data.resource_id,
         token=data.token,
+        webhook_url=data.webhook_url,
         expires_at=data.expires_at,
         start_page_token=data.start_page_token,
         created_at=data.created_at,

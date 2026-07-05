@@ -182,12 +182,17 @@ def upsert_conversion(...) -> None:
 ```
 
 Application tables managed via SQLAlchemy declarative models. **No
-migration framework** — `Base.metadata.create_all` runs on startup;
-column adds/renames require nuking the SQLite file and letting the
-`backfill` workflow re-populate `conversion_records` from Drive.
-Acceptable because Drive is source of truth and the vault also lives in
-Obsidian Sync. Revisit Alembic the first time that recovery path stops
-being cheap.
+migration framework**. `Base.metadata.create_all` runs on startup, and
+`state/schema.py::_apply_micro_migrations` handles targeted
+`ALTER TABLE ADD COLUMN` for existing installs on the tiny set of
+column additions we've needed — check the code before adding a fifth
+one and consider whether Alembic finally earns its keep.
+
+For anything more invasive than a nullable column addition (renames,
+type changes, non-null defaults), the recovery path is nuking the
+SQLite file and letting the `backfill` workflow re-populate
+`conversion_records` from Drive. Acceptable because Drive is source of
+truth and the vault also lives in Obsidian Sync.
 
 **`conversion_records`** — one row per **logical** `.note` (Drive path +
 name), because Supernote sync replaces the file rather than updating in
@@ -216,6 +221,7 @@ removed change event.
 | channel_id     | TEXT PK | UUID we generate                                 |
 | resource_id    | TEXT    | From Drive's response                            |
 | token          | TEXT    | 32-byte hex, for authenticity check              |
+| webhook_url    | TEXT    | Nullable; the URL this channel was registered with. `renew_watch_channel_impl` compares against `settings.webhook.url` and forces renewal on mismatch (e.g. ngrok URL changed) |
 | expires_at     | DATETIME| From Drive's response                            |
 | start_page_token | TEXT  | pageToken used at watch time                     |
 | created_at     | DATETIME|                                                  |
@@ -267,13 +273,22 @@ def renew_watch_channel(scheduled_time: datetime, context: str) -> None:
     )
 ```
 
-`renew_watch_channel_impl` skips when no webhook URL is configured or
-when the current active channel still has more than `RENEWAL_HEADROOM`
-(24h) remaining. Otherwise it fetches the current cursor (or seeds one
-via `get_start_page_token`), generates a random channel id + token,
-calls `drive.watch_changes(...)` with `ttl_seconds =
-settings.drive.watch_channel_ttl_days * 86_400`, persists the new
-channel, and marks it active.
+`renew_watch_channel_impl` decides to renew when any of the following
+holds:
+
+- No webhook URL is configured → skip.
+- No active channel row → create one.
+- Active channel's `webhook_url` doesn't match `settings.webhook.url`
+  → `drive.stop_channel(...)` best-effort on the old one, then create.
+  This is the "ngrok URL changed" story — just edit `.env`, restart.
+- Active channel's `expires_at - now` ≤ `RENEWAL_HEADROOM` (24h) → renew.
+
+Otherwise skip with `reason="still_fresh"`. On a decision to renew, it
+fetches the current cursor (or seeds one via `get_start_page_token`),
+generates a random channel id + token, calls `drive.watch_changes(...)`
+with `ttl_seconds = settings.drive.watch_channel_ttl_days * 86_400`,
+persists the new channel with the current `settings.webhook.url`, and
+marks it active.
 
 Startup helper `ensure_active_channel(drive, settings)` delegates to
 the same impl with `trigger_source="startup"` — seeds the first channel

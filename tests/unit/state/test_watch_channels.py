@@ -14,6 +14,7 @@ def _make(channel_id: str, **overrides: object) -> NewWatchChannel:
         channel_id=channel_id,
         resource_id=f"res-{channel_id}",
         token="secret",
+        webhook_url="https://example.com/webhooks/drive",
         expires_at=now + timedelta(days=7),
         start_page_token="10",
         created_at=now,

@@ -25,6 +25,8 @@ __all__ = [
 
 DEFAULT_SCOPES: tuple[str, ...] = ("https://www.googleapis.com/auth/drive.readonly",)
 
+_HTTP_NOT_FOUND = 404
+
 DEFAULT_FILE_FIELDS = "id,name,md5Checksum,size,parents,mimeType,trashed,modifiedTime"
 DEFAULT_CHANGES_FIELDS = (
     "nextPageToken,newStartPageToken,"
@@ -137,6 +139,21 @@ class DriveClient:
         if not files:
             return None
         return FileMetadata.model_validate(files[0])
+
+    def stop_channel(self, channel_id: str, resource_id: str) -> None:
+        """Stop a push-notification channel. Idempotent from the caller's view.
+
+        Google returns 404 when the channel is already gone (expired, or
+        stopped previously); we swallow that as success. Other errors
+        surface as `DriveClientError` so callers can log-and-continue.
+        """
+        body = {"id": channel_id, "resourceId": resource_id}
+        try:
+            self._service.channels().stop(body=body).execute()
+        except HttpError as exc:
+            if getattr(exc, "resp", None) is not None and exc.resp.status == _HTTP_NOT_FOUND:
+                return
+            raise DriveClientError(f"channels.stop failed: {exc}") from exc
 
     def watch_changes(
         self,
