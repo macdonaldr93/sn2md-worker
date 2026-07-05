@@ -148,9 +148,9 @@ def record_failure(
 def set_current_file_id(session: Session, *, logical_key: str, new_file_id: str) -> None:
     """Repoint an existing conversion record to a new Drive file id.
 
-    Used by `delete_output` when Supernote's replace-then-delete pattern
-    leaves a stale file id in our record but a live file at the same
-    logical path. No-op if the row doesn't exist.
+    Handles Supernote's replace-then-delete pattern: a stale file id
+    lingers in our record but a live file exists at the same logical
+    path. No-op if the row doesn't exist.
     """
     session.execute(
         update(ConversionRecord)
@@ -173,7 +173,7 @@ def get_by_current_file_id(session: Session, file_id: str) -> ConversionRecordVi
 def list_all_by_key(session: Session) -> dict[str, ConversionRecordView]:
     """Return every conversion record indexed by `logical_key`.
 
-    Used by `backfill` to swap N+1 per-file lookups for one bulk load.
+    Bulk load for callers that would otherwise do N+1 per-file lookups.
     For a Supernote-sized vault (hundreds to low thousands of notes),
     the whole set fits comfortably in memory.
     """

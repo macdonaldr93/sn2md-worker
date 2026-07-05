@@ -1,5 +1,3 @@
-"""BDD tests for the boot helpers in `sn2md_worker.__main__`."""
-
 from __future__ import annotations
 
 from pathlib import Path

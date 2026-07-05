@@ -1,9 +1,3 @@
-"""BDD-style tests for poll_changes_impl.
-
-The workflow's contract is a behavior: given a set of Drive changes and
-a cursor, it decides what to enqueue and how to advance the cursor.
-"""
-
 from __future__ import annotations
 
 from collections.abc import Iterator

@@ -271,10 +271,10 @@ class DriveClient:
     def find_live_note(self, parent_folder_id: str, name: str) -> FileMetadata | None:
         """Return a live (non-trashed) file in the given folder matching `name`.
 
-        Used by delete_output to detect Supernote's replace-then-delete
-        pattern: if the delete event is for an old file_id but a new file
-        with the same name already exists at the same location, we
-        re-point rather than nuke the vault output.
+        Detects Supernote's replace-then-delete pattern: if a delete
+        event fires for an old file_id but a new file with the same
+        name already exists at the same location, callers re-point
+        rather than nuke the vault output.
 
         Rejects non-printable names (NUL, newlines, DEL, Unicode format
         separators, etc.) — Google's query language quotes strings with

@@ -58,7 +58,6 @@ def _lock_for(logical_key_value: str) -> FileLock:
 
 @DBOS.workflow()
 def convert_note(file_id: str, source_path: str) -> None:
-    """DBOS-durable wrapper that delegates to the plain implementation."""
     convert_note_impl(
         file_id=file_id,
         source_path=source_path,

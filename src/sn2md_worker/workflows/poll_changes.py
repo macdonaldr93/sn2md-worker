@@ -37,7 +37,6 @@ _log = get_logger("sn2md_worker.workflows.poll_changes")
 
 @DBOS.workflow()
 def poll_changes(trigger_source: str) -> None:
-    """DBOS-durable wrapper that delegates to the plain implementation."""
     poll_changes_impl(
         trigger_source=trigger_source,
         drive=get_drive_client(),

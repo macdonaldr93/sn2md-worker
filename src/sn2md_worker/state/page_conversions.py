@@ -92,7 +92,6 @@ def delete_pages_at_or_beyond(session: Session, *, logical_key: str, page_index:
 
 
 def delete_all_for_note(session: Session, logical_key: str) -> int:
-    """Remove all page rows for a logical key. Used by `delete_output`."""
     stmt = delete(PageConversion).where(PageConversion.logical_key == logical_key)
     return _rowcount(session.execute(stmt))
 

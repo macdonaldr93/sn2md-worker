@@ -21,7 +21,6 @@ _log = get_logger("sn2md_worker.workflows.delete_output")
 
 @DBOS.workflow()
 def delete_output(file_id: str) -> None:
-    """DBOS-durable wrapper that delegates to the plain implementation."""
     delete_output_impl(
         file_id=file_id,
         drive=get_drive_client(),

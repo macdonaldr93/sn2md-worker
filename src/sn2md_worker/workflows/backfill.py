@@ -21,7 +21,6 @@ _log = get_logger("sn2md_worker.workflows.backfill")
 
 @DBOS.workflow()
 def backfill() -> None:
-    """DBOS-durable wrapper that delegates to the plain implementation."""
     backfill_impl(drive=get_drive_client(), settings=get_settings())
 
 

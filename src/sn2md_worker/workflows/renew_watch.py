@@ -36,7 +36,6 @@ _log = get_logger("sn2md_worker.workflows.renew_watch")
 
 @DBOS.workflow()
 def renew_watch_channel(scheduled_time: datetime, context: str) -> None:
-    """DBOS-scheduled wrapper that renews the watch channel if needed."""
     renew_watch_channel_impl(
         trigger_source=f"scheduled:{context}",
         drive=get_drive_client(),

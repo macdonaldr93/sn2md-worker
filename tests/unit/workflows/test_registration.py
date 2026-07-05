@@ -1,10 +1,3 @@
-"""BDD tests for `workflows.register_schedules` idempotency.
-
-The startup entrypoint calls `register_schedules()` every boot; DBOS
-persists rows in `workflow_schedules`, so on a second boot the row
-already exists. The register step must be a no-op in that case.
-"""
-
 from __future__ import annotations
 
 from unittest.mock import patch

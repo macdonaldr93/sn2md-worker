@@ -92,10 +92,10 @@ def confirm(
 ) -> None:
     """Fill in the Drive-side values on a previously-`create`d pending row.
 
-    Used by the renew_watch two-phase flow: `create` writes the row
-    before the Drive `changes.watch` HTTP call (so the channel_id+token
-    survive a crash between the two), then `confirm` writes back the
-    real `resource_id` + `expires_at` returned by Drive.
+    Two-phase flow: `create` writes the row before the Drive
+    `changes.watch` HTTP call so the channel_id+token survive a crash
+    between the two; `confirm` writes back the real `resource_id` +
+    `expires_at` returned by Drive.
     """
     session.execute(
         update(DriveWatchChannel)
@@ -105,7 +105,6 @@ def confirm(
 
 
 def delete_by_id(session: Session, channel_id: str) -> None:
-    """Remove a channel row (used to roll back a failed Drive call)."""
     session.execute(delete(DriveWatchChannel).where(DriveWatchChannel.channel_id == channel_id))
 
 
