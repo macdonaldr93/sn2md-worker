@@ -121,6 +121,20 @@ def _fake_result(*, pages: int, cached: dict[int, bool] | None = None) -> MultiP
     return MultiPageResult(pages=outcomes)
 
 
+def _run_stub(*, pages: int, cached: dict[int, bool] | None = None) -> object:
+    """side_effect that fires on_page_done per page like the real runner."""
+    result = _fake_result(pages=pages, cached=cached)
+
+    def _side_effect(**kwargs: object) -> MultiPageResult:
+        cb = kwargs.get("on_page_done")
+        if callable(cb):
+            for page in result.pages:
+                cb(page)
+        return result
+
+    return _side_effect
+
+
 class TestWhenConvertingANoteForTheFirstTime:
     def test_runs_multi_page_and_persists_a_success_record_and_page_rows(
         self, engine: Engine, settings: Settings, drive: MagicMock, tmp_path: Path
@@ -131,7 +145,7 @@ class TestWhenConvertingANoteForTheFirstTime:
 
         # WHEN
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
-            fake_run.return_value = _fake_result(pages=3)
+            fake_run.side_effect = _run_stub(pages=3)
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/Journal/2026-07.note",
@@ -170,7 +184,7 @@ class TestWhenAllPagesAreCached:
 
         # WHEN — the note re-converts with all pages reporting cache hits
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
-            fake_run.return_value = _fake_result(pages=2, cached={0: True, 1: True})
+            fake_run.side_effect = _run_stub(pages=2, cached={0: True, 1: True})
             convert_note_impl(
                 file_id="file-new",
                 source_path="Notebooks/2026-07.note",
@@ -197,7 +211,7 @@ class TestWhenTheNoteHasFewerPagesThanBefore:
 
         # WHEN — the current note has only 2 pages
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
-            fake_run.return_value = _fake_result(pages=2)
+            fake_run.side_effect = _run_stub(pages=2)
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
@@ -223,7 +237,7 @@ class TestWhenTheNoteHasFewerPagesThanBefore:
 
         # WHEN
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
-            fake_run.return_value = _fake_result(pages=2)
+            fake_run.side_effect = _run_stub(pages=2)
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
@@ -254,7 +268,7 @@ class TestWhenAPngOnlyOrphanExists:
 
         # WHEN — the new conversion produces 2 pages
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
-            fake_run.return_value = _fake_result(pages=2)
+            fake_run.side_effect = _run_stub(pages=2)
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
@@ -280,7 +294,7 @@ class TestWhenAnOldFlatMarkdownFileExists:
 
         # WHEN
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
-            fake_run.return_value = _fake_result(pages=1)
+            fake_run.side_effect = _run_stub(pages=1)
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
@@ -383,7 +397,7 @@ class TestWhenNoGeminiKeyIsConfigured:
 
         # WHEN
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
-            fake_run.return_value = _fake_result(pages=1)
+            fake_run.side_effect = _run_stub(pages=1)
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
@@ -396,26 +410,87 @@ class TestWhenNoGeminiKeyIsConfigured:
         assert fake_run.call_args.kwargs["api_key"] == "from-env"
 
 
-class TestLockPerLogicalKey:
-    def test_same_key_produces_lockfile_at_same_path(self) -> None:
-        # GIVEN
-        key = "Notebooks/Journal/2026-07.note"
+class TestWhenTheWorkflowCrashesMidNote:
+    def test_pages_persisted_before_the_crash_remain_in_the_db(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — callback fires for pages 0, 1, then run_multi_page raises.
+        drive.get_metadata.return_value = _file_metadata()
+        _stub_download(drive)
+
+        def crash_after_two_pages(**kwargs: object) -> MultiPageResult:
+            cb = kwargs.get("on_page_done")
+            assert callable(cb)
+            for i in range(2):
+                cb(
+                    PageOutcome(
+                        page_index=i,
+                        page_md5=f"md5-p{i}",
+                        output_rel_path=f"page-{i + 1:02d}.md",
+                        was_cached=False,
+                    )
+                )
+            raise RuntimeError("gemini blew up on page 3")
 
         # WHEN
-        first = convert_note_module._lock_for(key)
-        second = convert_note_module._lock_for(key)
+        with (
+            patch(
+                "sn2md_worker.workflows.convert_note.run_multi_page",
+                side_effect=crash_after_two_pages,
+            ),
+            pytest.raises(RuntimeError, match="page 3"),
+        ):
+            convert_note_impl(
+                file_id="file-1",
+                source_path="Notebooks/2026-07.note",
+                drive=drive,
+                settings=settings,
+            )
 
-        # THEN — the same lockfile path is used, so an acquire on `first`
-        # blocks a concurrent acquire on `second`.
-        assert first.lock_file == second.lock_file
+        # THEN — pages 0, 1 survive for the retry to hash-cache.
+        with Session(engine) as session:
+            pages = page_conversions.list_for_note(session, "Notebooks/2026-07.note")
+            record = conversions.get_by_logical_key(session, "Notebooks/2026-07.note")
+        assert [p.page_index for p in pages] == [0, 1]
+        # AND — record stays PENDING so `_already_up_to_date` won't short-circuit.
+        assert record is not None
+        assert record.last_status == ConversionStatus.PENDING
 
-    def test_different_keys_produce_different_lockfiles(self) -> None:
-        # GIVEN / WHEN
-        first = convert_note_module._lock_for("Notebooks/foo.note")
-        second = convert_note_module._lock_for("Notebooks/bar.note")
 
-        # THEN
-        assert first.lock_file != second.lock_file
+class TestPendingRecordWrittenBeforeMultiPageRuns:
+    def test_parent_record_exists_as_pending_when_run_multi_page_starts(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN
+        drive.get_metadata.return_value = _file_metadata()
+        _stub_download(drive)
+        observed_status: dict[str, str] = {}
+
+        def check_record(**kwargs: object) -> MultiPageResult:  # noqa: ARG001
+            with Session(engine) as session:
+                record = conversions.get_by_logical_key(session, "Notebooks/2026-07.note")
+            assert record is not None
+            observed_status["at_start"] = record.last_status
+            return _fake_result(pages=1)
+
+        # WHEN
+        with patch(
+            "sn2md_worker.workflows.convert_note.run_multi_page",
+            side_effect=check_record,
+        ):
+            convert_note_impl(
+                file_id="file-1",
+                source_path="Notebooks/2026-07.note",
+                drive=drive,
+                settings=settings,
+            )
+
+        # THEN — PENDING mid-run, SUCCESS after finalize.
+        assert observed_status["at_start"] == ConversionStatus.PENDING
+        with Session(engine) as session:
+            record = conversions.get_by_logical_key(session, "Notebooks/2026-07.note")
+        assert record is not None
+        assert record.last_status == ConversionStatus.SUCCESS
 
 
 class TestConvertNoteAcquiresLockAroundWork:
@@ -430,15 +505,15 @@ class TestConvertNoteAcquiresLockAroundWork:
         drive.get_metadata.return_value = _file_metadata()
         _stub_download(drive)
 
-        # WHEN — spy on `_lock_for` while the workflow runs
+        # WHEN — spy on the lock helper as imported into convert_note
         with (
             patch(
-                "sn2md_worker.workflows.convert_note._lock_for",
-                wraps=convert_note_module._lock_for,
+                "sn2md_worker.workflows.convert_note.lock_for",
+                wraps=convert_note_module.lock_for,
             ) as spy,
             patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run,
         ):
-            fake_run.return_value = _fake_result(pages=1)
+            fake_run.side_effect = _run_stub(pages=1)
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",

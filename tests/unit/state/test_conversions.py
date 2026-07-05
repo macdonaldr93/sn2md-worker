@@ -102,6 +102,36 @@ class TestDeleteByLogicalKey:
         assert conversions.delete_by_logical_key(session, "does/not/exist") is False
 
 
+class TestMarkSuccess:
+    def test_flips_a_pending_record_to_success_without_touching_attempts(
+        self, session: Session
+    ) -> None:
+        # GIVEN
+        conversions.upsert(session, _make_upsert(status=ConversionStatus.PENDING))
+        session.flush()
+
+        # WHEN
+        later = datetime(2026, 7, 5, 15, 30, tzinfo=UTC)
+        conversions.mark_success(session, logical_key=LOGICAL_KEY, when=later)
+        session.flush()
+
+        # THEN — attempts stays at 1 (double-upsert would have made it 2).
+        record = conversions.get_by_logical_key(session, LOGICAL_KEY)
+        assert record is not None
+        assert record.last_status == ConversionStatus.SUCCESS
+        assert record.last_converted_at == later
+        assert record.attempts == 1
+        assert record.last_error is None
+
+    def test_is_a_noop_when_no_record_exists(self, session: Session) -> None:
+        # WHEN
+        conversions.mark_success(session, logical_key="does/not/exist", when=NOW)
+        session.flush()
+
+        # THEN
+        assert conversions.get_by_logical_key(session, "does/not/exist") is None
+
+
 class TestRecordFailure:
     def test_marks_the_record_as_error_with_the_provided_message(self, session: Session) -> None:
         # WHEN

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import os
 import tempfile
 from datetime import UTC, datetime
@@ -8,11 +7,11 @@ from pathlib import Path
 
 import structlog
 from dbos import DBOS
-from filelock import FileLock
 
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.conversion.multi_page import (
     MultiPageResult,
+    PageOutcome,
     page_index_from_filename,
     run_multi_page,
 )
@@ -29,31 +28,11 @@ from sn2md_worker.state import conversions, page_conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import ConversionStatus
 from sn2md_worker.state.page_conversions import PageConversionUpsert
+from sn2md_worker.workflows.locks import lock_for
 
 __all__ = ["convert_note", "convert_note_impl"]
 
 _log = get_logger("sn2md_worker.workflows.convert_note")
-
-# Convert_queue has worker_concurrency > 1 by default; two workers picking
-# up back-to-back `convert_note` invocations for the same logical_key
-# (webhook race with backfill, or two fast Supernote saves) would race on
-# writes to `output_dir/page-NN.{md,png}`. Serializing per-key via
-# `filelock` (OS-level advisory lock) keeps us safe within one process and
-# stays correct if we ever run multiple containers off the same vault.
-_LOCK_DIR = Path(tempfile.gettempdir()) / "sn2md-worker-locks"
-
-
-def _lock_for(logical_key_value: str) -> FileLock:
-    """Return a FileLock keyed by a stable hash of the logical_key.
-
-    Lockfiles land in a shared temp directory rather than the vault so
-    they never confuse Obsidian; the file itself only carries the lock
-    state, not any note data. Auto-released when the process exits
-    (fcntl-backed under the hood).
-    """
-    _LOCK_DIR.mkdir(parents=True, exist_ok=True)
-    digest = hashlib.sha256(logical_key_value.encode("utf-8")).hexdigest()[:16]
-    return FileLock(str(_LOCK_DIR / f"{digest}.lock"))
 
 
 @DBOS.workflow()
@@ -77,9 +56,7 @@ def convert_note_impl(
     try:
         key = logical_key(source_path)
     except UnsafePathError as exc:
-        # Skip cleanly so DBOS doesn't retry a workflow that will always
-        # fail on the same source_path — the offending name isn't going
-        # to sanitize itself. Operator investigates via the logged path.
+        # DBOS would retry forever on a permanently-unsafe path.
         _log.warning(
             "convert_note_skipped",
             reason="unsafe_path",
@@ -92,10 +69,9 @@ def convert_note_impl(
         workflow="convert_note", file_id=file_id, logical_key=key
     ):
         _log.info("convert_note_started")
-        # Acquire before the up-to-date check so two concurrent workers
-        # can't both see "not up to date" and both do the work; the
-        # second to acquire will re-check and skip via `_already_up_to_date`.
-        with _lock_for(key):
+        # Lock before the up-to-date check so two workers can't both
+        # observe "stale" and both re-run.
+        with lock_for(key):
             try:
                 meta = drive.get_metadata(file_id)
                 if meta.trashed:
@@ -108,8 +84,21 @@ def convert_note_impl(
 
                 existing_pages = _load_existing_pages(key)
                 now = datetime.now(UTC)
-
+                parent_folder_id = meta.parents[0] if meta.parents else None
                 output_dir = note_output_dir(source_path, settings.vault.root_path)
+
+                # PENDING before the loop → crash-visible to delete_output
+                # and refused as up-to-date by a retry.
+                _persist_pending_start(
+                    key=key,
+                    file_id=file_id,
+                    parent_folder_id=parent_folder_id,
+                    meta_name=meta.name,
+                    meta_md5=meta.md5_checksum,
+                    source_path=source_path,
+                    now=now,
+                )
+
                 with tempfile.TemporaryDirectory(prefix="sn2md-worker-") as tmp_root:
                     note_path = drive.download(file_id, Path(tmp_root), meta.name)
 
@@ -117,7 +106,8 @@ def convert_note_impl(
                         "convert_note_running_multi_page",
                         output_dir=str(output_dir),
                         model=settings.sn2md.model,
-                        known_pages=len(existing_pages),
+                        # DB-known rows; runner also picks up orphan .md/.png on disk.
+                        db_known_pages=len(existing_pages),
                     )
                     result = run_multi_page(
                         note_path=note_path,
@@ -127,21 +117,14 @@ def convert_note_impl(
                         existing_pages=existing_pages,
                         now=now,
                         prompt=settings.sn2md.prompt,
+                        on_page_done=lambda page: _persist_page(key=key, page=page, when=now),
                     )
 
-                _persist_success(
+                _persist_finalize(
                     key=key,
-                    file_id=file_id,
-                    parent_folder_id=meta.parents[0] if meta.parents else None,
-                    meta_name=meta.name,
-                    meta_md5=meta.md5_checksum,
-                    source_path=source_path,
                     result=result,
                     now=now,
-                )
-                _cleanup_stale_pages(
-                    note_output_dir=output_dir,
-                    current_page_count=len(result.pages),
+                    output_dir=output_dir,
                     note_basename=Path(meta.name).stem,
                 )
 
@@ -174,7 +157,7 @@ def _load_existing_pages(logical_key_value: str) -> dict[int, str]:
     return {row.page_index: row.page_md5 for row in rows}
 
 
-def _persist_success(
+def _persist_pending_start(
     *,
     key: str,
     file_id: str,
@@ -182,7 +165,6 @@ def _persist_success(
     meta_name: str,
     meta_md5: str | None,
     source_path: str,
-    result: MultiPageResult,
     now: datetime,
 ) -> None:
     with sql_session() as session, session.begin():
@@ -197,23 +179,44 @@ def _persist_success(
                 source_md5=meta_md5,
                 output_rel_path=output_rel_path(source_path),
                 last_converted_at=now,
-                status=ConversionStatus.SUCCESS,
+                status=ConversionStatus.PENDING,
             ),
         )
-        for page in result.pages:
-            page_conversions.upsert(
-                session,
-                PageConversionUpsert(
-                    logical_key=key,
-                    page_index=page.page_index,
-                    page_md5=page.page_md5,
-                    output_rel_path=page.output_rel_path,
-                    last_converted_at=now,
-                ),
-            )
+
+
+def _persist_page(*, key: str, page: PageOutcome, when: datetime) -> None:
+    with sql_session() as session, session.begin():
+        page_conversions.upsert(
+            session,
+            PageConversionUpsert(
+                logical_key=key,
+                page_index=page.page_index,
+                page_md5=page.page_md5,
+                output_rel_path=page.output_rel_path,
+                last_converted_at=when,
+            ),
+        )
+
+
+def _persist_finalize(
+    *,
+    key: str,
+    result: MultiPageResult,
+    now: datetime,
+    output_dir: Path,
+    note_basename: str,
+) -> None:
+    with sql_session() as session, session.begin():
+        # UPDATE (not upsert) so `attempts` from PENDING isn't double-counted.
+        conversions.mark_success(session, logical_key=key, when=now)
         page_conversions.delete_pages_at_or_beyond(
             session, logical_key=key, page_index=len(result.pages)
         )
+    _cleanup_stale_pages(
+        note_output_dir=output_dir,
+        current_page_count=len(result.pages),
+        note_basename=note_basename,
+    )
 
 
 def _cleanup_stale_pages(
@@ -222,10 +225,7 @@ def _cleanup_stale_pages(
     current_page_count: int,
     note_basename: str,
 ) -> None:
-    """Delete `page-NN.md` / `page-NN.png` for pages beyond the current
-    count, plus the legacy flat `<basename>.md` and sidecar if either
-    lingers from pre-multi-page conversions.
-    """
+    """Prune page files beyond `current_page_count` plus legacy pre-multi-page artifacts."""
     if not note_output_dir.exists():
         return
 
@@ -243,9 +243,7 @@ def _cleanup_stale_pages(
             if idx is not None:
                 (note_output_dir / f"page-{idx + 1:02d}.png").unlink(missing_ok=True)
 
-    # Second pass to catch PNG-only orphans: if a prior run crashed
-    # between `copy2(png)` and `write_text(md)`, the PNG lingers without
-    # a peer .md and the md-driven loop above never sees it.
+    # Second pass catches PNG-only orphans (crash between .png and .md write).
     for stale_png in note_output_dir.glob("page-*.png"):
         idx = page_index_from_filename(stale_png.name)
         if idx is None or idx >= current_page_count:

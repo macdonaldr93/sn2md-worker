@@ -17,6 +17,7 @@ __all__ = [
     "get_by_logical_key",
     "list_all_by_key",
     "list_recent_by_status",
+    "mark_success",
     "record_failure",
     "set_current_file_id",
     "upsert",
@@ -143,6 +144,20 @@ def record_failure(
         },
     )
     session.execute(stmt)
+
+
+def mark_success(session: Session, *, logical_key: str, when: datetime) -> None:
+    """Flip PENDING → SUCCESS without touching `attempts` (a second upsert
+    would double-count it). No-op if the row doesn't exist."""
+    session.execute(
+        update(ConversionRecord)
+        .where(ConversionRecord.logical_key == logical_key)
+        .values(
+            last_status=ConversionStatus.SUCCESS,
+            last_converted_at=when,
+            last_error=None,
+        )
+    )
 
 
 def set_current_file_id(session: Session, *, logical_key: str, new_file_id: str) -> None:

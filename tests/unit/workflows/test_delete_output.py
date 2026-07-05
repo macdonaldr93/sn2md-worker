@@ -18,6 +18,7 @@ from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
 from sn2md_worker.workflows.convert_note import convert_note
 from sn2md_worker.workflows.delete_output import delete_output_impl
+from sn2md_worker.workflows.locks import lock_for
 from sn2md_worker.workflows.queues import CONVERT_QUEUE_NAME
 
 NOW = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
@@ -202,6 +203,68 @@ class TestWhenOutputRelPathIsEmpty:
         # THEN — vault root and its contents are untouched
         assert stray.exists()
         # AND — record still exists (guard prevented delete_by_logical_key)
+        with Session(engine) as session:
+            assert conversions.get_by_logical_key(session, LOGICAL_KEY) is not None
+
+
+class TestDeleteOutputAcquiresLockAroundWork:
+    def test_lock_for_is_invoked_with_the_logical_key(
+        self,
+        engine: Engine,  # noqa: ARG002
+        settings: Settings,
+        drive: MagicMock,
+        vault_root: Path,
+    ) -> None:
+        # GIVEN
+        _seed_record(engine, file_id="file-1", parent_folder_id="parent-1")
+        _seed_output_dir(vault_root)
+        drive.find_live_note.return_value = None
+
+        # WHEN
+        with patch(
+            "sn2md_worker.workflows.delete_output.lock_for",
+            wraps=lock_for,
+        ) as spy:
+            delete_output_impl(file_id="file-1", drive=drive, settings=settings)
+
+        # THEN — locked before rmtree'ing under a possibly-concurrent convert.
+        spy.assert_called_once_with(LOGICAL_KEY)
+
+
+class TestWhenTheRecordIsRepointedByAConcurrentConvert:
+    def test_second_read_inside_the_lock_re_checks_current_file_id(
+        self,
+        engine: Engine,
+        settings: Settings,
+        drive: MagicMock,
+        vault_root: Path,
+    ) -> None:
+        # GIVEN — a convert repoints current_file_id between our two reads.
+        _seed_record(engine, file_id="file-1", parent_folder_id="parent-1")
+        _seed_output_dir(vault_root)
+
+        original_get = conversions.get_by_current_file_id
+        call_count = {"n": 0}
+
+        def racy_get(session, file_id):
+            call_count["n"] += 1
+            if call_count["n"] == 2:
+                with Session(engine) as write_sess, write_sess.begin():
+                    conversions.set_current_file_id(
+                        write_sess, logical_key=LOGICAL_KEY, new_file_id="file-2"
+                    )
+            return original_get(session, file_id)
+
+        # WHEN
+        with patch(
+            "sn2md_worker.workflows.delete_output.conversions.get_by_current_file_id",
+            side_effect=racy_get,
+        ):
+            delete_output_impl(file_id="file-1", drive=drive, settings=settings)
+
+        # THEN — bails with no_record_after_lock; vault + record intact.
+        drive.find_live_note.assert_not_called()
+        assert (vault_root / "Notebooks" / "2026-07" / "2026-07.md").exists()
         with Session(engine) as session:
             assert conversions.get_by_logical_key(session, LOGICAL_KEY) is not None
 

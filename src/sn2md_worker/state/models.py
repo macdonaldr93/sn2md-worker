@@ -60,6 +60,7 @@ class ConversionStatus:
     SUCCESS = "SUCCESS"
     ERROR = "ERROR"
     SKIPPED = "SKIPPED"
+    PENDING = "PENDING"
 
 
 _NAMING_CONVENTION = {

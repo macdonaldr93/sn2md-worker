@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import re
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -109,37 +110,34 @@ def run_multi_page(
     existing_pages: dict[int, str],
     now: datetime,
     prompt: str | None = None,
+    on_page_done: Callable[[PageOutcome], None] | None = None,
 ) -> MultiPageResult:
-    """Convert every page of `note_path`, skipping pages whose PNG hash
-    matches what's in `existing_pages` at the same index.
-
-    Writes `output_dir/page-NN.md` + `output_dir/page-NN.png` per page and
-    an `output_dir/index.md` linking them. `prompt` overrides the
-    stricter `DEFAULT_PROMPT`; must contain a `{context}` placeholder.
+    """Convert every page of `note_path`, reusing prior LLM output by
+    hash so a page inserted mid-note doesn't cascade re-transcription
+    across every subsequent page. `on_page_done` fires per page after
+    the .md write so callers can persist state incrementally.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     prompt_template = prompt or DEFAULT_PROMPT
     outcomes: list[PageOutcome] = []
+    cached_bodies_by_hash = _preload_cached_bodies(existing_pages, output_dir)
 
     with tempfile.TemporaryDirectory(prefix="sn2md-pages-") as extract_root:
         pngs = _extract_pngs(note_path, Path(extract_root))
         previous_markdown = ""
         for page_index, png_path in enumerate(pngs):
-            # One read: buffer + hash in a single pass. If the page is
-            # cached we drop the buffer; if not we write it out below,
-            # avoiding the second full read `shutil.copy2` used to do.
             page_bytes = png_path.read_bytes()
             page_md5 = hashlib.md5(page_bytes, usedforsecurity=False).hexdigest()
             page_md = output_dir / page_filename(page_index)
             page_png = output_dir / _asset_filename(page_index)
-            cached = existing_pages.get(page_index) == page_md5 and page_md.exists()
+            cached_body = cached_bodies_by_hash.get(page_md5)
 
-            if cached:
-                previous_markdown = page_md.read_text(encoding="utf-8")
+            if cached_body is not None:
+                body = cached_body
             else:
                 context = _tail(previous_markdown)
                 try:
-                    llm_output = _call_gemini_with_retry(
+                    body = _call_gemini_with_retry(
                         png_path=png_path,
                         context=context,
                         api_key=api_key,
@@ -155,25 +153,29 @@ def run_multi_page(
                         f"{note_path.name} after retries "
                         f"({type(exc).__name__}: {exc})"
                     ) from exc
-                page_png.write_bytes(page_bytes)
-                rendered = _render_page(
-                    page_index=page_index,
-                    total=len(pngs),
-                    llm_output=llm_output,
-                    asset_name=page_png.name,
-                    created_on=now.date().isoformat(),
-                )
-                page_md.write_text(rendered, encoding="utf-8")
-                previous_markdown = rendered
 
-            outcomes.append(
-                PageOutcome(
-                    page_index=page_index,
-                    page_md5=page_md5,
-                    output_rel_path=page_md.name,
-                    was_cached=cached,
-                )
+            rendered = _render_page(
+                page_index=page_index,
+                total=len(pngs),
+                llm_output=body,
+                asset_name=page_png.name,
+                created_on=now.date().isoformat(),
             )
+            # Unconditional write — cache-hit at a shifted index would
+            # otherwise leave nothing at the new slot.
+            page_png.write_bytes(page_bytes)
+            page_md.write_text(rendered, encoding="utf-8")
+            previous_markdown = rendered
+
+            outcome = PageOutcome(
+                page_index=page_index,
+                page_md5=page_md5,
+                output_rel_path=page_md.name,
+                was_cached=cached_body is not None,
+            )
+            outcomes.append(outcome)
+            if on_page_done is not None:
+                on_page_done(outcome)
 
     _write_index(output_dir, outcomes, note_basename=note_path.stem, now=now)
     return MultiPageResult(pages=outcomes)
@@ -203,6 +205,76 @@ def page_index_from_filename(name: str) -> int | None:
         return int(stem.removeprefix("page-")) - 1
     except ValueError:
         return None
+
+
+# Anchored to \Z so we only strip the render's own trailing image line,
+# not an inline image the user might have added mid-body.
+_TRAILING_IMAGE_RE = re.compile(r"\n\n!\[Page \d+\]\(page-\d+\.png\)\n?\Z")
+_FRONTMATTER_CLOSE = "\n---\n\n"
+
+
+def _extract_cached_body(rendered: str) -> str | None:
+    """Peel frontmatter + trailing image ref off a prior `page-NN.md`.
+
+    Returns None for unparseable files (user edit removed the image ref,
+    legacy pre-multi-page format) so those pages fall back to Gemini.
+    """
+    close_idx = rendered.find(_FRONTMATTER_CLOSE)
+    if close_idx == -1:
+        return None
+    body_with_image = rendered[close_idx + len(_FRONTMATTER_CLOSE) :]
+    stripped, replacements = _TRAILING_IMAGE_RE.subn("", body_with_image)
+    if replacements == 0:
+        return None
+    return stripped
+
+
+def _preload_cached_bodies(existing_pages: dict[int, str], output_dir: Path) -> dict[str, str]:
+    """Index prior page bodies by md5 for hash-first cache lookup. Two
+    passes: DB rows use their recorded md5; orphan .md files (crashed
+    between .md write and DB upsert) key on the sibling .png's md5."""
+    bodies: dict[str, str] = {}
+    covered: set[int] = set()
+
+    for old_index, page_md5 in existing_pages.items():
+        body = _read_body_at(output_dir, old_index)
+        if body is None:
+            continue
+        bodies.setdefault(page_md5, body)
+        covered.add(old_index)
+
+    if not output_dir.is_dir():
+        return bodies
+
+    for md_path in output_dir.glob("page-*.md"):
+        idx = page_index_from_filename(md_path.name)
+        if idx is None or idx in covered:
+            continue
+        png_path = output_dir / _asset_filename(idx)
+        if not png_path.is_file():
+            continue
+        try:
+            png_bytes = png_path.read_bytes()
+        except OSError:
+            continue
+        png_md5 = hashlib.md5(png_bytes, usedforsecurity=False).hexdigest()
+        body = _read_body_at(output_dir, idx)
+        if body is None:
+            continue
+        bodies.setdefault(png_md5, body)
+
+    return bodies
+
+
+def _read_body_at(output_dir: Path, page_index: int) -> str | None:
+    path = output_dir / page_filename(page_index)
+    if not path.is_file():
+        return None
+    try:
+        rendered = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return _extract_cached_body(rendered)
 
 
 def _log_gemini_retry(retry_state: RetryCallState) -> None:
