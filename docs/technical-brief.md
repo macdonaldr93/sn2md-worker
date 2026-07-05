@@ -215,6 +215,19 @@ place (see §4a).
 An index on `current_file_id` lets `delete_output` find a record from a
 removed change event.
 
+**`page_conversions`** — one row per converted `.note` page, keyed on
+`(logical_key, page_index)`. Used by the multi-page runner to skip
+Gemini calls for pages whose PNG hash hasn't changed since last
+convert.
+
+| column          | type    | notes                                            |
+|-----------------|---------|--------------------------------------------------|
+| logical_key     | TEXT    | Composite PK with page_index                     |
+| page_index      | INTEGER | Composite PK; 0-indexed                          |
+| page_md5        | TEXT    | md5 of the rendered PNG                          |
+| output_rel_path | TEXT    | Path relative to the note folder, e.g. `page-01.md` |
+| last_converted_at | DATETIME |                                                |
+
 **`drive_watch_channels`** — one row per active/superseded push channel
 | column         | type    | notes                                            |
 |----------------|---------|--------------------------------------------------|
@@ -346,12 +359,21 @@ def convert_note(file_id: str, source_path: str) -> None:
 2. `drive.get_metadata(file_id)` — early return if trashed.
 3. Idempotency check: if `conversion_records[logical_key]` has matching
    `source_md5`, `SUCCESS` status, and same `current_file_id`, skip.
-4. `tempfile.TemporaryDirectory()` — `drive.download(file_id, tmp_dir, name)`
-   returns the local path.
-5. `sn2md_output_dir(source_path, vault_root).mkdir(parents=True, exist_ok=True)`.
-6. `run_sn2md(note_path=..., output_dir=..., model=..., api_key=_resolve_gemini_key(settings))`.
-7. Upsert conversion_records with the new md5, `parent_folder_id = meta.parents[0]`,
-   `output_rel_path(source_path)`, and `SUCCESS`.
+4. Load per-page state: `page_conversions.list_for_note(session, key)` →
+   `{page_index: page_md5}` dict.
+5. `drive.download(file_id, tmp_dir, name)` → local path.
+6. `note_output_dir(source_path, vault_root)` gives the per-note vault
+   folder (`<vault>/<parents>/<basename>/`).
+7. `run_multi_page(...)` — extracts PNGs, hashes each, calls Gemini only
+   for pages whose hash doesn't match the cache. Writes `page-NN.md` +
+   `page-NN.png` per page and an `index.md`. See §6.
+8. Upsert `conversion_records` with new md5, `parent_folder_id`, output
+   path, and `SUCCESS`. Upsert one `page_conversions` row per current
+   page. Delete `page_conversions` rows for indexes ≥ current page
+   count (pages removed from the note).
+9. Sweep the note folder: remove stale `page-NN.md` / `page-NN.png` for
+   dropped pages and the legacy flat `<basename>.md` /
+   `.sn2md.metadata.yaml` from pre-multi-page installs.
 
 Any uncaught exception is logged as `convert_note_failed` (with
 traceback) and re-raised so DBOS records the workflow as ERROR.
@@ -401,58 +423,55 @@ initialized.
 
 ## 6. sn2md integration
 
-Chosen path: **use as a library**, not subprocess.
+Chosen path: **use as a library**, not subprocess. We **don't** call
+`import_supernote_file_core` — that's the single-file wrapper we
+outgrew when multi-page caching became a requirement. Instead we drive
+sn2md's per-page primitives ourselves in `conversion/multi_page.py`:
 
-```python
-from sn2md.importer import import_supernote_file_core
-from sn2md.importers.note import NotebookExtractor
-from sn2md.types import Config
+- `NotebookExtractor.extract_images(file_name, output_path) → list[str]`
+  — renders each `.note` page to PNG.
+- `sn2md.ai_utils.image_to_markdown(png_path, context, api_key, model,
+  prompt) → str` — LLM call for a single page. We reuse sn2md's
+  `TO_MARKDOWN_TEMPLATE` verbatim.
 
-def run_sn2md(note_path: Path, output_dir: Path) -> None:
-    cfg = Config(
-        model=settings.sn2md_model,               # "gemini/gemini-2.5-pro"
-        api_key=settings.gemini_api_key.get_secret_value(),
-        # leave prompt/templates as sn2md defaults
-    )
-    import_supernote_file_core(
-        image_extractor=NotebookExtractor(),
-        file_name=str(note_path),
-        output=str(output_dir),
-        config=cfg,
-        force=True,      # our own idempotency layer decides when to run
-        progress=False,  # no tqdm bars in daemon logs
-        model=None,
-    )
-    # Clean up sn2md's own idempotency sidecar; we don't consult it and
-    # it's noise in the vault.
-    for sidecar in output_dir.rglob(".sn2md.metadata.yaml"):
-        sidecar.unlink(missing_ok=True)
+Output shape per note (under `note_output_dir(source_path, vault_root)`):
+
+```
+<basename>/
+├── index.md          # Obsidian wikilinks: [[page-01]], [[page-02]], ...
+├── page-01.md        # frontmatter (page, of, tags) + Gemini output + image link
+├── page-01.png
+├── page-02.md
+├── page-02.png
 ```
 
+Caching: `run_multi_page` extracts + hashes every page, looks up
+`existing_pages[i]` (loaded from `page_conversions`), and calls Gemini
+only when the hash differs. Cached pages keep their existing
+`page-NN.md` on disk untouched; the runner still returns a
+`PageOutcome(was_cached=True)` so callers see the full page list. Result
+counters (`gemini_calls`, `cache_hits`) get logged as
+`convert_note_succeeded` fields.
+
 **Notes / gotchas**:
-- sn2md maintains its own `.sn2md.metadata.yaml` sidecar for
-  idempotency, but its `check_metadata_file` **raises `ValueError` if the
-  source is unchanged** and if the *output* was modified externally. Since
-  we're the sole writer and we gate on our own `conversion_records`
-  table, we bypass sn2md's check by passing `force=True`.
-- After each successful `run_sn2md`, delete the `.sn2md.metadata.yaml`
-  sidecar from the output directory. It has no value to us (we use our
-  own `conversion_records`) and it's noise in the vault.
-- sn2md's default output shape is `<output>/<file_basename>/<file_basename>.md`
-  with images inside that subdir. We choose `output_dir` per note so the
-  vault ends up mirroring Drive layout.
-- sn2md's `image_to_text` also calls the LLM to decode Supernote H1–H4
-  title highlights — every title costs one Gemini call. Not a bug, just
-  worth knowing for rate-limit sizing.
-- `sn2md` writes to stdout on success (`print(output_path_and_file)`). We
-  redirect stdout or accept the noise; not critical.
+- **We no longer use sn2md's `.sn2md.metadata.yaml` sidecar.** It was
+  needed when we called `import_supernote_file_core`; multi-page mode
+  doesn't touch it. If it lingers in the vault from a pre-multi-page
+  install, `_cleanup_stale_pages` deletes it on the next convert.
+- **Legacy flat `<basename>.md`** — same story. Removed on next
+  convert.
+- **Page reordering** — v1 keys the cache on
+  `(logical_key, page_index)`. If you insert a page at position 2,
+  pages 2..N re-run through Gemini because their hashes don't match
+  the neighbors they've been compared to. Fixable by hash-first
+  matching if this becomes painful; deferred.
 - **Model string**: use `gemini/gemini-2.5-pro` (with prefix). Verified
   2026-07-04 that the unprefixed `gemini-2.5-pro` doesn't resolve via
   `llm-gemini` 0.32+.
-- **Measured baseline**: ~7.5s wall-clock per single-page mostly-drawing
-  note against Gemini 2.5 Pro. Scales linearly with page count. Informs
-  the `convert_concurrency=2` default — Gemini rate-limit friendly, and
-  a Supernote user's throughput doesn't need more.
+- **Measured baseline**: ~7.5s wall-clock per page against Gemini 2.5
+  Pro. Scales linearly with the number of pages that missed the cache
+  — a single new page on a 20-page note is ~7.5s (not 150s). Informs
+  the `convert_concurrency=2` default.
 
 ## 7. Drive client (`drive/client.py`)
 

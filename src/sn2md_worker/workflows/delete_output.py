@@ -10,7 +10,7 @@ from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.db import sql_session
 from sn2md_worker.drive.client import DriveClient, get_drive_client
 from sn2md_worker.logging import get_logger
-from sn2md_worker.state import conversions
+from sn2md_worker.state import conversions, page_conversions
 
 __all__ = ["delete_output", "delete_output_impl"]
 
@@ -72,6 +72,7 @@ def delete_output_impl(
 
             with sql_session() as session, session.begin():
                 conversions.delete_by_logical_key(session, record.logical_key)
+                page_conversions.delete_all_for_note(session, record.logical_key)
             _log.info(
                 "delete_output_succeeded",
                 logical_key=record.logical_key,

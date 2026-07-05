@@ -7,6 +7,7 @@ import pytest
 from sn2md_worker.conversion.paths import (
     basename,
     logical_key,
+    note_output_dir,
     output_rel_path,
     sn2md_output_dir,
 )
@@ -58,6 +59,16 @@ class TestSn2mdOutputDir:
         assert sn2md_output_dir("Notebooks/Journal/2026-07.note", Path("./vault")) == Path(
             "vault/Notebooks/Journal"
         )
+
+
+class TestNoteOutputDir:
+    def test_nested_gives_per_note_folder_under_vault(self) -> None:
+        assert note_output_dir("Notebooks/Journal/2026-07.note", Path("/vault")) == Path(
+            "/vault/Notebooks/Journal/2026-07"
+        )
+
+    def test_root_level_gives_folder_next_to_vault_root(self) -> None:
+        assert note_output_dir("2026-07.note", Path("/vault")) == Path("/vault/2026-07")
 
 
 class TestOutputRelPath:

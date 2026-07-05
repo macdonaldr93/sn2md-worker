@@ -12,6 +12,7 @@ __all__ = [
     "DebounceState",
     "DriveChangeCursor",
     "DriveWatchChannel",
+    "PageConversion",
     "UTCDateTime",
 ]
 
@@ -104,6 +105,22 @@ class DriveChangeCursor(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     page_token: Mapped[str] = mapped_column(String)
     last_polled_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
+class PageConversion(Base):
+    """One row per converted `.note` page.
+
+    Keyed on `(logical_key, page_index)` — used to skip Gemini calls when
+    a page's rendered PNG hash matches what we've already converted.
+    """
+
+    __tablename__ = "page_conversions"
+
+    logical_key: Mapped[str] = mapped_column(String, primary_key=True)
+    page_index: Mapped[int] = mapped_column(Integer, primary_key=True)
+    page_md5: Mapped[str] = mapped_column(String)
+    output_rel_path: Mapped[str] = mapped_column(String)
+    last_converted_at: Mapped[datetime] = mapped_column(UTCDateTime())
 
 
 class DebounceState(Base):

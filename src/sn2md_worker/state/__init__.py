@@ -7,6 +7,7 @@ from sn2md_worker.state.models import (
     DebounceState,
     DriveChangeCursor,
     DriveWatchChannel,
+    PageConversion,
 )
 from sn2md_worker.state.schema import init_schema
 
@@ -17,5 +18,6 @@ __all__ = [
     "DebounceState",
     "DriveChangeCursor",
     "DriveWatchChannel",
+    "PageConversion",
     "init_schema",
 ]

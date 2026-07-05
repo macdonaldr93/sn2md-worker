@@ -9,7 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
 
-__all__ = ["basename", "logical_key", "output_rel_path", "sn2md_output_dir"]
+__all__ = [
+    "basename",
+    "logical_key",
+    "note_output_dir",
+    "output_rel_path",
+    "sn2md_output_dir",
+]
 
 
 def logical_key(drive_source_path: str) -> str:
@@ -32,6 +38,15 @@ def sn2md_output_dir(drive_source_path: str, vault_root: Path) -> Path:
     if str(parent) in ("", "."):
         return vault_root
     return vault_root / str(parent)
+
+
+def note_output_dir(drive_source_path: str, vault_root: Path) -> Path:
+    """The per-note folder on disk: `<vault>/<parent-dirs>/<basename>/`.
+
+    This is where the multi-page runner writes `page-01.md`, `page-01.png`,
+    `index.md`, etc. Concretely: `sn2md_output_dir(...) / basename(...)`.
+    """
+    return sn2md_output_dir(drive_source_path, vault_root) / basename(drive_source_path)
 
 
 def output_rel_path(drive_source_path: str) -> str:
