@@ -1,0 +1,4 @@
+#!/usr/bin/with-contenv bash
+
+export HOME=/config
+exec s6-setuidgid abc ob sync --continuous --path /vault
