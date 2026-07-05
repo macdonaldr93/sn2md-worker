@@ -22,6 +22,18 @@ mirror_source_layout = true
 model = "gemini/gemini-2.5-pro"
 # api_key can be set here, or via env: LLM_GEMINI_KEY or SN2MD_WORKER__SN2MD__API_KEY
 
+# Optional: override the per-page prompt. Must contain a {context}
+# placeholder — the worker substitutes the tail of the previous page's
+# markdown into it. Leave unset to use conversion.multi_page.DEFAULT_PROMPT
+# (CommonMark + ASCII-only mermaid guidance). See docs/technical-brief.md §6.
+# prompt = """
+# ###
+# Context (last few lines of the previous page):
+# {context}
+# ###
+# ...your custom instructions...
+# """
+
 [queue]
 convert_concurrency = 2
 convert_rate_limit_per_minute = 30

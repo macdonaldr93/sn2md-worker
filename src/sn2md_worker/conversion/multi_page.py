@@ -23,6 +23,7 @@ from sn2md.importers.note import NotebookExtractor
 from sn2md.types import TO_MARKDOWN_TEMPLATE
 
 __all__ = [
+    "DEFAULT_PROMPT",
     "MultiPageResult",
     "PageOutcome",
     "Sn2mdRunError",
@@ -31,6 +32,27 @@ __all__ = [
     "page_index_from_filename",
     "run_multi_page",
 ]
+
+# We take sn2md's `TO_MARKDOWN_TEMPLATE` as our base — same {context}
+# placeholder, same core rules — and layer on stricter guidance so
+# Gemini stops producing mermaid blocks with Unicode arrows that break
+# the parser. Override at runtime via `[sn2md] prompt = "..."` in
+# config.toml if you need something different.
+_STRICTER_GUIDANCE = """
+- If you produce a ```mermaid``` code block: use ONLY ASCII characters
+  inside it. No Unicode arrows (→, ⇒, ⟶), en/em dashes
+  (–, —), smart quotes (“”‘’), ellipses
+  (…), or emoji. Use ASCII substitutes (-->, ->>, --, ...,
+  "straight quotes"). Quote node labels with spaces or punctuation:
+  A["My Node"]. Stick to standard diagram types (flowchart,
+  sequenceDiagram, classDiagram, stateDiagram, erDiagram, gantt, pie,
+  journey). If you can't produce syntactically valid mermaid, output
+  an ASCII sketch inside a plain fenced code block instead.
+- Escape unbalanced backticks, angle brackets, and pipe characters in
+  prose so the surrounding Markdown stays valid CommonMark.
+"""
+
+DEFAULT_PROMPT = TO_MARKDOWN_TEMPLATE.rstrip() + "\n" + _STRICTER_GUIDANCE.lstrip()
 
 
 @dataclass(frozen=True)
@@ -66,14 +88,17 @@ def run_multi_page(
     api_key: str,
     existing_pages: dict[int, str],
     now: datetime,
+    prompt: str | None = None,
 ) -> MultiPageResult:
     """Convert every page of `note_path`, skipping pages whose PNG hash
     matches what's in `existing_pages` at the same index.
 
     Writes `output_dir/page-NN.md` + `output_dir/page-NN.png` per page and
-    an `output_dir/index.md` linking them.
+    an `output_dir/index.md` linking them. `prompt` overrides the
+    stricter `DEFAULT_PROMPT`; must contain a `{context}` placeholder.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
+    prompt_template = prompt or DEFAULT_PROMPT
     outcomes: list[PageOutcome] = []
 
     with tempfile.TemporaryDirectory(prefix="sn2md-pages-") as extract_root:
@@ -91,7 +116,7 @@ def run_multi_page(
                 context = _tail(previous_markdown)
                 try:
                     llm_output = image_to_markdown(
-                        str(png_path), context, api_key, model, TO_MARKDOWN_TEMPLATE
+                        str(png_path), context, api_key, model, prompt_template
                     )
                 except Exception as exc:  # noqa: BLE001
                     raise Sn2mdRunError(

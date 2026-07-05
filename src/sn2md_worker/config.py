@@ -31,6 +31,7 @@ class VaultConfig(BaseModel, frozen=True):
 class Sn2mdConfig(BaseModel, frozen=True):
     model: str = "gemini/gemini-2.5-pro"
     api_key: SecretStr | None = None
+    prompt: str | None = None  # falls back to conversion.multi_page.DEFAULT_PROMPT
 
 
 class QueueConfig(BaseModel, frozen=True):

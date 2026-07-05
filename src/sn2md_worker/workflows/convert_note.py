@@ -82,6 +82,7 @@ def convert_note_impl(
                     api_key=_resolve_gemini_key(settings),
                     existing_pages=existing_pages,
                     now=now,
+                    prompt=settings.sn2md.prompt,
                 )
 
             _persist_success(

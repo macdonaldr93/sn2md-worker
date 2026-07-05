@@ -431,8 +431,17 @@ sn2md's per-page primitives ourselves in `conversion/multi_page.py`:
 - `NotebookExtractor.extract_images(file_name, output_path) → list[str]`
   — renders each `.note` page to PNG.
 - `sn2md.ai_utils.image_to_markdown(png_path, context, api_key, model,
-  prompt) → str` — LLM call for a single page. We reuse sn2md's
-  `TO_MARKDOWN_TEMPLATE` verbatim.
+  prompt) → str` — LLM call for a single page.
+
+**Prompt**: `conversion.multi_page.DEFAULT_PROMPT` — sn2md's
+`TO_MARKDOWN_TEMPLATE` verbatim as the base, with two additional
+bullets appended: (1) ASCII-only characters inside ```mermaid``` code
+blocks (Unicode arrows, en/em dashes, smart quotes, ellipses, and
+emoji were breaking Mermaid's parser), (2) escape unbalanced
+backticks / angle brackets / pipes in prose. Users can override the
+whole thing with `[sn2md] prompt = "..."` in `config.toml`. Any
+override must contain the `{context}` placeholder — the runner
+substitutes the previous page's tail into it.
 
 Output shape per note (under `note_output_dir(source_path, vault_root)`):
 

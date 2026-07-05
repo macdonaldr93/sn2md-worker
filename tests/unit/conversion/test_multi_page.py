@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from sn2md_worker.conversion.multi_page import (
+    DEFAULT_PROMPT,
     index_filename,
     page_filename,
     page_index_from_filename,
@@ -39,47 +42,46 @@ class TestIndexFilename:
         assert index_filename() == "index.md"
 
 
-def _stub_extract(pngs: list[Path]):
-    class FakeExtractor:
-        def extract_images(self, filename: str, dest: str) -> list[str]:  # noqa: ARG002
-            return [str(p) for p in pngs]
+class TestDefaultPrompt:
+    def test_contains_context_placeholder(self) -> None:
+        assert "{context}" in DEFAULT_PROMPT
 
-    return FakeExtractor
+    def test_requires_ascii_only_mermaid(self) -> None:
+        # Cheap regression guard: if someone edits the prompt and drops
+        # the ASCII rule, this fires.
+        assert "ASCII" in DEFAULT_PROMPT
+        assert "mermaid" in DEFAULT_PROMPT.lower()
+
+
+def _fake_extract_factory(pngs_map: dict[str, bytes]) -> Any:
+    """Return a callable that, when patched onto NotebookExtractor.extract_images,
+    writes the given (name → bytes) pngs into the destination dir."""
+
+    def fake_extract_images(self, filename: str, dest: str) -> list[str]:  # noqa: ARG001
+        dest_dir = Path(dest)
+        paths = []
+        for name, content in pngs_map.items():
+            path = dest_dir / name
+            path.write_bytes(content)
+            paths.append(str(path))
+        return paths
+
+    return fake_extract_images
 
 
 class TestRunMultiPageFreshConversion:
     def test_writes_one_page_md_per_page_plus_index_and_calls_gemini_for_each(
         self, tmp_path: Path
     ) -> None:
-        # GIVEN — two page PNGs staged on disk with distinct content
-        pngs_src = tmp_path / "src"
-        pngs_src.mkdir()
-        page1 = pngs_src / "p1.png"
-        page2 = pngs_src / "p2.png"
-        page1.write_bytes(b"png-1-content")
-        page2.write_bytes(b"png-2-content")
-
+        # GIVEN
         note_path = tmp_path / "note.note"
         note_path.write_bytes(b"note-bytes")
         output_dir = tmp_path / "vault" / "note"
 
-        pages_returned: list[Path] = []
-
-        def fake_extract_images(self, filename: str, dest: str) -> list[str]:  # noqa: ARG001
-            # The runner uses a temp dir; copy the sources in so they can be hashed.
-            dest_dir = Path(dest)
-            copied = []
-            for src in (page1, page2):
-                target = dest_dir / src.name
-                target.write_bytes(src.read_bytes())
-                copied.append(target)
-            pages_returned.extend(copied)
-            return [str(p) for p in copied]
-
         with (
             patch(
                 "sn2md_worker.conversion.multi_page.NotebookExtractor.extract_images",
-                fake_extract_images,
+                _fake_extract_factory({"p1.png": b"png-1-content", "p2.png": b"png-2-content"}),
             ),
             patch(
                 "sn2md_worker.conversion.multi_page.image_to_markdown",
@@ -95,19 +97,17 @@ class TestRunMultiPageFreshConversion:
                 now=NOW,
             )
 
-        # THEN — both pages ran through Gemini
+        # THEN
         assert fake_llm.call_count == 2
         assert result.gemini_calls == 2
         assert result.cache_hits == 0
 
-        # AND — page files and the index are on disk
         assert (output_dir / "page-01.md").is_file()
         assert (output_dir / "page-01.png").is_file()
         assert (output_dir / "page-02.md").is_file()
         assert (output_dir / "page-02.png").is_file()
         assert (output_dir / "index.md").is_file()
 
-        # AND — the index links to each page as an Obsidian wikilink
         index_body = (output_dir / "index.md").read_text()
         assert "[[page-01]]" in index_body
         assert "[[page-02]]" in index_body
@@ -115,30 +115,19 @@ class TestRunMultiPageFreshConversion:
 
 class TestRunMultiPageWithCachedPages:
     def test_skips_gemini_for_pages_whose_hash_matches(self, tmp_path: Path) -> None:
-        # GIVEN — one page whose hash we've already seen, one new
+        # GIVEN
         note_path = tmp_path / "note.note"
         note_path.write_bytes(b"note-bytes")
         output_dir = tmp_path / "vault" / "note"
         output_dir.mkdir(parents=True)
-
-        # Pre-populate page-01.md so the cache hit can read it as context.
         (output_dir / "page-01.md").write_text("previous content for page 1")
-
-        def fake_extract_images(self, filename: str, dest: str) -> list[str]:  # noqa: ARG001
-            dest_dir = Path(dest)
-            (dest_dir / "p1.png").write_bytes(b"page-1-bytes")
-            (dest_dir / "p2.png").write_bytes(b"page-2-bytes")
-            return [str(dest_dir / "p1.png"), str(dest_dir / "p2.png")]
-
-        # md5(b"page-1-bytes") — precompute for the cache key
-        import hashlib
 
         page1_md5 = hashlib.md5(b"page-1-bytes", usedforsecurity=False).hexdigest()
 
         with (
             patch(
                 "sn2md_worker.conversion.multi_page.NotebookExtractor.extract_images",
-                fake_extract_images,
+                _fake_extract_factory({"p1.png": b"page-1-bytes", "p2.png": b"page-2-bytes"}),
             ),
             patch(
                 "sn2md_worker.conversion.multi_page.image_to_markdown",
@@ -154,9 +143,69 @@ class TestRunMultiPageWithCachedPages:
                 now=NOW,
             )
 
-        # THEN — only page 2 hit Gemini
         assert fake_llm.call_count == 1
         assert result.cache_hits == 1
         assert result.gemini_calls == 1
         assert result.pages[0].was_cached is True
         assert result.pages[1].was_cached is False
+
+
+class TestRunMultiPageHonorsCustomPrompt:
+    def test_calls_gemini_with_the_override_prompt(self, tmp_path: Path) -> None:
+        # GIVEN
+        note_path = tmp_path / "note.note"
+        note_path.write_bytes(b"note-bytes")
+        output_dir = tmp_path / "vault" / "note"
+        custom_prompt = "MY OVERRIDE — {context}"
+
+        with (
+            patch(
+                "sn2md_worker.conversion.multi_page.NotebookExtractor.extract_images",
+                _fake_extract_factory({"p1.png": b"page-1-bytes"}),
+            ),
+            patch(
+                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                return_value="md",
+            ) as fake_llm,
+        ):
+            run_multi_page(
+                note_path=note_path,
+                output_dir=output_dir,
+                model="fake-model",
+                api_key="fake-key",
+                existing_pages={},
+                now=NOW,
+                prompt=custom_prompt,
+            )
+
+        # THEN — the custom prompt was passed through as the last positional arg
+        # to image_to_markdown(path, context, api_key, model, prompt).
+        assert fake_llm.call_args.args[4] == custom_prompt
+
+    def test_falls_back_to_default_prompt_when_none_supplied(self, tmp_path: Path) -> None:
+        # GIVEN
+        note_path = tmp_path / "note.note"
+        note_path.write_bytes(b"note-bytes")
+        output_dir = tmp_path / "vault" / "note"
+
+        with (
+            patch(
+                "sn2md_worker.conversion.multi_page.NotebookExtractor.extract_images",
+                _fake_extract_factory({"p1.png": b"page-1-bytes"}),
+            ),
+            patch(
+                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                return_value="md",
+            ) as fake_llm,
+        ):
+            run_multi_page(
+                note_path=note_path,
+                output_dir=output_dir,
+                model="fake-model",
+                api_key="fake-key",
+                existing_pages={},
+                now=NOW,
+                # prompt omitted → DEFAULT_PROMPT
+            )
+
+        assert fake_llm.call_args.args[4] == DEFAULT_PROMPT
