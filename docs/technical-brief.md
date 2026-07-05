@@ -42,9 +42,9 @@ able to start coding from here without re-litigating decisions.
     └────────────────────────────────────────────────────┘
                              │
                              ▼
-                Obsidian container on Unraid
-                    (opens /vault, pushes
-                    changes via Obsidian Sync)
+                obsidian-sync container on Unraid
+                (headless CLI on the same /vault,
+                    pushes changes via Obsidian Sync)
                              │
                              ▼
                      Phones, laptop, etc.
@@ -714,7 +714,8 @@ LAN-only or behind reverse-proxy auth.
      from an off-network machine).
 5. **Vault path**
    - Ensure the vault directory exists on Unraid and is mounted into both
-     the Obsidian container and this worker (`/vault`).
+     the `obsidian-sync` container (headless CLI) and this worker
+     (`/vault`). See `docs/unraid-runbook.md` §2 for the sync setup.
 
 ## 12. Security notes
 
@@ -767,14 +768,22 @@ LAN-only or behind reverse-proxy auth.
     "change_cursor":      {"page_token": "...", "last_polled_at": "..."},
     "queue_depth":        {"convert_queue": 0, "poll_queue": 0},
     "backfill":           {"status": "SUCCESS", "started_at": "...",
-                           "completed_at": "...", "error": null}
+                           "completed_at": "...", "error": null},
+    "startup":            {"drive_client": "ok", "seed_cursor": "ok",
+                           "ensure_channel": "ok", "backfill_enqueue": "ok",
+                           "last_error": null}
   }
   ```
   `queue_depth` and `backfill` are read via raw SQL against DBOS's own
   `workflow_status` table (`observability._query_queue_depth` /
   `_query_backfill_status`). If the table is missing (early test setup,
   pre-`DBOS.launch()`), both fields fall back to zero / null defaults
-  instead of erroring the endpoint.
+  instead of erroring the endpoint. `startup` reads the process-wide
+  `startup_status.StartupStatus` singleton written once at boot by
+  `__main__.py`; each field is `"ok"` | `"deferred"` | `"failed"` (see
+  [`docs/unraid-runbook.md#10-startup-model`](./unraid-runbook.md#10-startup-model)).
+  When no startup has been recorded yet (early boot, tests without the
+  entrypoint), every field defaults to `"deferred"`.
 
 ### Structured log events
 

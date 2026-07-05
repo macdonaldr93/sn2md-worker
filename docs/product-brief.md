@@ -20,8 +20,10 @@ Runs continuously as a Docker container on my Unraid server.
    conversion (via the `page_conversions` cache table), and writes one
    Markdown file per page plus an `index.md` under a per-note folder
    that mirrors the Drive layout.
-5. Destination is a local vault directory on Unraid; an Obsidian instance
-   on the same host has that directory open and pushes to Obsidian Sync.
+5. Destination is a local vault directory on Unraid; a companion
+   `obsidian-sync` container runs Obsidian's headless sync CLI against
+   the same vault dir and pushes changes into Obsidian Sync, which
+   fans them out to phone/laptop.
 
 ## Decisions
 
@@ -149,7 +151,11 @@ Runs continuously as a Docker container on my Unraid server.
 
 - **Runtime**: Docker container, linuxserver.io-style — supports `PUID`,
   `PGID`, `TZ`, `UMASK` env vars for correct host-side file ownership.
-  Multi-arch image (`linux/amd64` + `linux/arm64`) published to GHCR.
+  Two multi-arch (`linux/amd64` + `linux/arm64`) images published to
+  GHCR from the same repo: `sn2md-worker` (the worker) and
+  `sn2md-worker/obsidian-sync` (a companion running Obsidian's headless
+  sync CLI against the shared vault dir). Unraid operations are
+  documented in `docs/unraid-runbook.md`.
 - **Mounts**:
   - `/data` — DBOS + application SQLite state, must be writable.
   - `/vault` — bind-mount to the Obsidian vault path on the host, must

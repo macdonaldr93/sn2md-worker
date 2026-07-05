@@ -6,6 +6,7 @@ a Docker container on Unraid.
 
 - Product context — [`docs/product-brief.md`](docs/product-brief.md)
 - Implementation design — [`docs/technical-brief.md`](docs/technical-brief.md)
+- Unraid operations — [`docs/unraid-runbook.md`](docs/unraid-runbook.md)
 - Nested guides: [`src/sn2md_worker/workflows/CLAUDE.md`](src/sn2md_worker/workflows/CLAUDE.md),
   [`tests/unit/CLAUDE.md`](tests/unit/CLAUDE.md)
 

@@ -9,6 +9,8 @@ for Unraid but works anywhere Docker does.
 
 - Product context — [`docs/product-brief.md`](docs/product-brief.md)
 - Implementation design — [`docs/technical-brief.md`](docs/technical-brief.md)
+- Unraid operations — [`docs/unraid-runbook.md`](docs/unraid-runbook.md)
+  (install, upgrade, backup, troubleshoot, and enable Obsidian Sync)
 - Contributor knowledge — [`CLAUDE.md`](CLAUDE.md) (start here if you're
   landing on this repo cold)
 
@@ -30,7 +32,7 @@ Supernote ─sync→ Google Drive ─push notification→ /webhooks/drive
                     │           /vault  (bind mount)        │
                     └───────────────────────────────────────┘
                                    │
-                          Obsidian on the host
+                    obsidian-sync container (headless CLI)
                                    │
                           Obsidian Sync → phones, laptop
 ```
@@ -141,15 +143,23 @@ old Drive channel, and creates a fresh one. No SQLite nuke required.
 
 ## Deploying
 
-### From the published image (Unraid, headless servers)
+Full Unraid walkthrough (install, upgrade, backup, troubleshoot, and
+the Obsidian Sync container) lives in
+[`docs/unraid-runbook.md`](docs/unraid-runbook.md).
+
+### From the published images
+
+Two multi-arch (`linux/amd64` + `linux/arm64`) images are published to
+GHCR on every push to `main` and every `v*` tag:
 
 ```sh
 docker pull ghcr.io/macdonaldr93/sn2md-worker:latest
+docker pull ghcr.io/macdonaldr93/sn2md-worker/obsidian-sync:latest   # optional companion, see runbook §2
 ```
 
-Adapt the `image:` line in your `docker-compose.yml` to point at
-`ghcr.io/macdonaldr93/sn2md-worker:latest` and drop the `build:`
-block. Multi-arch: `linux/amd64` + `linux/arm64`.
+For your compose or Unraid template, point `image:` at these tags and
+drop any `build:` blocks. Prefer a pinned tag (`:v0.1.0` or
+`:sha-abc1234`) over `:latest` in production so rollback is a tag flip.
 
 ### From source
 
