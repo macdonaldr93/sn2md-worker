@@ -154,7 +154,9 @@ def _create_and_activate(
     channel can still authenticate (channel_id + token match) — the
     orphan-on-Drive risk isn't fully eliminated (Drive doesn't expose a
     "list my channels" API), but at least notifications aren't lost
-    silently.
+    silently. The placeholder `expires_at` is `now + 7 days` (Drive's
+    default TTL) so `drive_webhook._authenticate`'s expiry check
+    doesn't reject pushes arriving between phase 1 and phase 2.
 
     Phase 2: `confirm` writes back Drive's real `resource_id` and
     `expires_at`, then `mark_active` promotes the row. On a Drive-side
@@ -172,11 +174,13 @@ def _create_and_activate(
                 channel_id=channel_id,
                 # Placeholders — `confirm` overwrites both once Drive replies.
                 # A row in this state is "pending": auth-usable but not yet
-                # promoted via `mark_active`.
+                # promoted via `mark_active`. `expires_at` matches Drive's
+                # default 7-day TTL so webhook auth accepts pushes during
+                # the phase-1→phase-2 window.
                 resource_id="",
                 token=token,
                 webhook_url=settings.webhook.url,
-                expires_at=now,
+                expires_at=now + timedelta(days=7),
                 start_page_token=page_token,
                 created_at=now,
             ),
