@@ -244,49 +244,46 @@ Volumes:
 | `/config` | `/mnt/user/appdata/obsidian-sync` | Read/Write |
 | `/vault` | `/mnt/user/obsidian/vault` (same dir as sn2md-worker) | Read/Write |
 
-Environment variables (linuxserver-style — the baseimage reshapes its
-`abc` user to PUID:PGID at boot and chowns `/config` to match):
+Environment variables (linuxserver-style baseimage plus obsidian-sync's
+own auto-config contract):
 
 | Name | Value | Notes |
 |---|---|---|
-| `PUID` | `99` (same as sn2md-worker) | Must match so both containers write the vault as the same user |
-| `PGID` | `100` (same as sn2md-worker) | ... |
+| `PUID` | `99` (same as sn2md-worker) | Baseimage reshapes `abc` to this UID and chowns `/config` on boot |
+| `PGID` | `100` (same as sn2md-worker) | Must match sn2md-worker so both write the vault as the same user |
 | `TZ` | `America/Toronto` | Any IANA zone |
+| `OBSIDIAN_EMAIL` | your Obsidian account email | Mark secret |
+| `OBSIDIAN_PASSWORD` | your Obsidian account password | Mark secret |
+| `OBSIDIAN_VAULT` | remote vault name (or ID) from your Obsidian account | The vault you created from desktop/mobile Obsidian |
+| `OBSIDIAN_ENCRYPTION_PASSWORD` | E2E encryption password for that vault | Mark secret |
+| `OBSIDIAN_MFA` | 6-digit 2FA code | Only needed on very first boot if your account has 2FA on; can be removed after successful login |
 
-Click Apply. The container will restart-loop until you complete auth
-in the next step — expected.
+Click Apply.
 
-### 2.3 Authenticate and pair the vault
+### 2.3 First boot behaviour
 
-`ob` is interactive; run it via `docker exec -it` while the container
-is up (looping is fine — the exec attaches to a fresh process). Pass
-`-u abc` so config files are owned by the reshaped PUID/PGID user
-that s6 runs the sync loop as:
+The s6 service is entirely self-configuring. On boot it, as `abc` with
+`HOME=/config`:
+
+1. Runs `ob login --email --password [--mfa]` if `/config/.config/obsidian-headless/auth_token`
+   is missing.
+2. Runs `ob sync-setup --vault "$OBSIDIAN_VAULT" --path /vault --password "$OBSIDIAN_ENCRYPTION_PASSWORD"`
+   if `ob sync-status --path /vault` reports no configuration.
+3. Runs `ob sync --continuous --path /vault`.
+
+If a required env var is missing when it's needed, the container logs a
+clear message and idles (no crash-loop). Tail the logs to see progress:
 
 ```sh
-# 1. Log in with your Obsidian account. Interactive prompt for email +
-#    password. 2FA behavior is undocumented — if login fails and your
-#    account has 2FA on, that's likely why (temporarily disable it,
-#    log in, re-enable).
-docker exec -it -u abc obsidian-sync ob login
-
-# 2. Point headless at the mounted vault. `--vault` is the REMOTE
-#    vault name (or ID) in your Obsidian account — the one you
-#    created from desktop/mobile Obsidian. `--path` is the local dir
-#    inside this container that mirrors that remote vault. You'll be
-#    prompted for the vault's E2E encryption password.
-docker exec -it -u abc obsidian-sync ob sync-setup \
-  --vault "<remote vault name>" \
-  --path /vault
-
-# 3. Restart. The s6 service runs `ob sync --continuous --path /vault`;
-#    logs should settle into a steady stream instead of restart-looping.
-docker restart obsidian-sync
 docker logs -f obsidian-sync
 ```
 
-If the exact subcommand syntax has drifted since this was written,
-`docker exec -it -u abc obsidian-sync ob --help` shows the current CLI.
+Do **not** run `ob login` / `ob sync-setup` manually via `docker exec`
+or the Unraid console — the auto-config flow handles them, and any
+files an interactive root shell writes into `/config/.config/` will be
+root-owned and unreadable by the `abc` service. If you ever need to
+reset from scratch, stop the container, `rm -rf /mnt/user/appdata/obsidian-sync/*`,
+and restart. Auto-config will re-pair the vault from env.
 
 ### 2.4 Pair your devices
 

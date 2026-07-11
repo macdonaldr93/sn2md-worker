@@ -1,4 +1,42 @@
 #!/usr/bin/with-contenv bash
+set -eu
 
-export HOME=/config
-exec s6-setuidgid abc ob sync --continuous --path /vault
+log() { echo "obsidian-sync: $*" >&2; }
+
+idle_with_message() {
+    log "$1"
+    log "set the required env vars and restart the container"
+    exec sleep infinity
+}
+
+# Every ob invocation runs as abc with HOME=/config so state stays abc-owned.
+ob_as_abc() {
+    s6-setuidgid abc env HOME=/config ob "$@"
+}
+
+if [ ! -s /config/.config/obsidian-headless/auth_token ]; then
+    if [ -z "${OBSIDIAN_EMAIL:-}" ] || [ -z "${OBSIDIAN_PASSWORD:-}" ]; then
+        idle_with_message "not logged in; OBSIDIAN_EMAIL / OBSIDIAN_PASSWORD not set"
+    fi
+    log "logging in as $OBSIDIAN_EMAIL"
+    login_args=(--email "$OBSIDIAN_EMAIL" --password "$OBSIDIAN_PASSWORD")
+    if [ -n "${OBSIDIAN_MFA:-}" ]; then
+        login_args+=(--mfa "$OBSIDIAN_MFA")
+    fi
+    if ! ob_as_abc login "${login_args[@]}"; then
+        idle_with_message "ob login failed"
+    fi
+fi
+
+if ! ob_as_abc sync-status --path /vault >/dev/null 2>&1; then
+    if [ -z "${OBSIDIAN_VAULT:-}" ] || [ -z "${OBSIDIAN_ENCRYPTION_PASSWORD:-}" ]; then
+        idle_with_message "/vault not configured; OBSIDIAN_VAULT / OBSIDIAN_ENCRYPTION_PASSWORD not set"
+    fi
+    log "configuring /vault against remote vault '$OBSIDIAN_VAULT'"
+    if ! ob_as_abc sync-setup --vault "$OBSIDIAN_VAULT" --path /vault --password "$OBSIDIAN_ENCRYPTION_PASSWORD"; then
+        idle_with_message "ob sync-setup failed"
+    fi
+fi
+
+log "starting continuous sync for /vault"
+exec s6-setuidgid abc env HOME=/config ob sync --continuous --path /vault

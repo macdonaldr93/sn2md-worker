@@ -9,8 +9,10 @@ RUN apk --no-cache upgrade \
  && apk del npm \
  && rm -rf /root/.npm /tmp/*
 
-# `ob` writes auth/state under $HOME/.config — point at the persistent volume.
-ENV HOME=/config
+# `ob` writes auth/state under $HOME/.config. The s6 run script sets
+# HOME=/config only for the abc-supervised service invocation, so root
+# shells (e.g. Unraid console) don't accidentally write into the volume
+# and leave root-owned files the service can't read.
 VOLUME ["/config", "/vault"]
 
 COPY root/ /
