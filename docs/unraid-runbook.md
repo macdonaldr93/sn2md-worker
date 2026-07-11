@@ -223,7 +223,24 @@ record the tag you installed. The Dockerfile lives at
 [`docker/obsidian-sync/Dockerfile`](../docker/obsidian-sync/Dockerfile)
 if you want to inspect or build it locally.
 
-### 2.2 Add the container
+### 2.2 Prepare the host paths
+
+The image runs as a fixed non-root user baked at build time (uid `99`,
+gid `100`, matching Unraid's `nobody:users`). No PUID/PGID reshaping,
+no s6, no root shell inside the container. Both writable bind mounts
+must be owned by `99:100` on the host or the container will EACCES on
+first write:
+
+```sh
+mkdir -p /mnt/user/appdata/obsidian-sync
+chown -R 99:100 /mnt/user/appdata/obsidian-sync /mnt/user/obsidian/vault
+```
+
+The `/vault` chown is the ownership-alignment step that keeps
+sn2md-worker (running as `PUID=99, PGID=100`) and obsidian-sync writing
+as the same user - the co-ownership constraint in §2.5.
+
+### 2.3 Add the container
 
 Docker tab → Add Container:
 
@@ -234,7 +251,7 @@ Docker tab → Add Container:
 | Network Type | `Bridge` |
 | Restart Policy | `unless-stopped` |
 
-No port mapping — the container makes outbound HTTPS only, to
+No port mapping - the container makes outbound HTTPS only, to
 Obsidian's Sync servers.
 
 Volumes:
@@ -244,26 +261,26 @@ Volumes:
 | `/config` | `/mnt/user/appdata/obsidian-sync` | Read/Write |
 | `/vault` | `/mnt/user/obsidian/vault` (same dir as sn2md-worker) | Read/Write |
 
-Environment variables (linuxserver-style baseimage plus obsidian-sync's
-own auto-config contract):
+Environment variables:
 
 | Name | Value | Notes |
 |---|---|---|
-| `PUID` | `99` (same as sn2md-worker) | Baseimage reshapes `abc` to this UID and chowns `/config` on boot |
-| `PGID` | `100` (same as sn2md-worker) | Must match sn2md-worker so both write the vault as the same user |
-| `TZ` | `America/Toronto` | Any IANA zone |
+| `TZ` | `America/Toronto` | Any IANA zone (optional, for log timestamps only) |
 | `OBSIDIAN_EMAIL` | your Obsidian account email | Mark secret |
 | `OBSIDIAN_PASSWORD` | your Obsidian account password | Mark secret |
 | `OBSIDIAN_VAULT` | remote vault name (or ID) from your Obsidian account | The vault you created from desktop/mobile Obsidian |
 | `OBSIDIAN_ENCRYPTION_PASSWORD` | E2E encryption password for that vault | Mark secret |
 | `OBSIDIAN_MFA` | 6-digit 2FA code | Only needed on very first boot if your account has 2FA on; can be removed after successful login |
 
+There is no `PUID`/`PGID`/`UMASK` for this container - the runtime uid
+is fixed in the image. If you need a different uid for your host,
+rebuild locally with `--build-arg APP_UID=<uid> --build-arg APP_GID=<gid>`.
+
 Click Apply.
 
-### 2.3 First boot behaviour
+### 2.4 First boot behaviour
 
-The s6 service is entirely self-configuring. On boot it, as `abc` with
-`HOME=/config`:
+The entrypoint is entirely self-configuring:
 
 1. Runs `ob login --email --password [--mfa]` if `/config/.config/obsidian-headless/auth_token`
    is missing.
@@ -278,14 +295,13 @@ clear message and idles (no crash-loop). Tail the logs to see progress:
 docker logs -f obsidian-sync
 ```
 
-Do **not** run `ob login` / `ob sync-setup` manually via `docker exec`
-or the Unraid console — the auto-config flow handles them, and any
-files an interactive root shell writes into `/config/.config/` will be
-root-owned and unreadable by the `abc` service. If you ever need to
-reset from scratch, stop the container, `rm -rf /mnt/user/appdata/obsidian-sync/*`,
-and restart. Auto-config will re-pair the vault from env.
+There is no root inside the container, so there is no way for an
+interactive shell to write root-owned files into `/config`. If you
+ever want to reset from scratch, stop the container,
+`rm -rf /mnt/user/appdata/obsidian-sync/*`, re-run the `chown 99:100`
+from §2.2, and restart. Auto-config will re-pair the vault from env.
 
-### 2.4 Pair your devices
+### 2.5 Pair your devices
 
 On each phone and laptop:
 
@@ -298,20 +314,20 @@ writes into `/vault` on Unraid are picked up by `ob sync --continuous`
 and pushed out — new notes should appear on your other devices within
 seconds.
 
-### 2.5 Ownership sanity check
+### 2.6 Ownership sanity check
 
 sn2md-worker and obsidian-sync must both write the vault as the same
 user, or one will produce files the other can't read:
 
 ```sh
 ls -la /mnt/user/obsidian/vault | head
-# All files should show the same owner. If sn2md-worker files are
-# 99:100 but obsidian-sync's are e.g. 1000:1000, fix the `--user`
-# flag on the obsidian-sync template, restart, and normalize
-# existing files: `chown -R 99:100 /mnt/user/obsidian/vault`.
+# All files should show owner 99:100. If sn2md-worker files are
+# 99:100 but obsidian-sync's are something else (or vice versa),
+# something wrote to the vault outside these two containers.
+# Normalize: `chown -R 99:100 /mnt/user/obsidian/vault`.
 ```
 
-### 2.6 Do not run desktop Obsidian on the vault dir
+### 2.7 Do not run desktop Obsidian on the vault dir
 
 Obsidian warns explicitly against mixing headless sync with
 desktop-app Sync on the same on-disk vault — they race for the same
