@@ -40,5 +40,16 @@ if ! ob sync-status --path /vault >/dev/null 2>&1; then
     fi
 fi
 
+# obsidian-headless treats /vault/.obsidian/.sync.lock/ with an mtime under
+# 5 seconds old as "another instance is running." A back-to-back sync-setup
+# then sync (as we do above) trips that check, and a hard container kill
+# leaves the dir behind. This container is the only ob sync runner in the
+# deployment, so we can safely clear a stale lock before starting.
+# Upstream: https://github.com/obsidianmd/obsidian-headless/issues/4
+if [ -d /vault/.obsidian/.sync.lock ]; then
+    log "clearing stale /vault/.obsidian/.sync.lock before starting sync"
+    rm -rf /vault/.obsidian/.sync.lock
+fi
+
 log "starting continuous sync for /vault"
 exec ob sync --continuous --path /vault
