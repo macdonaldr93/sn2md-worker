@@ -21,6 +21,7 @@ from sn2md_worker.workflows.poll_changes import poll_changes
 
 CHANNEL_ID = "chan-1"
 CHANNEL_TOKEN = "tok-1"
+NOW = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -32,9 +33,16 @@ def engine(tmp_path: Path) -> Iterator[Engine]:
     eng.dispose()
 
 
+@pytest.fixture(autouse=True)
+def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Freeze `now_utc()` in the webhook module so channel-expiry auth
+    is stable across calendar dates in CI."""
+    monkeypatch.setattr("sn2md_worker.drive.webhook.now_utc", lambda: NOW)
+
+
 @pytest.fixture
 def registered_channel(engine: Engine) -> None:
-    now = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+    now = NOW
     with Session(engine) as session, session.begin():
         watch_channels.create(
             session,

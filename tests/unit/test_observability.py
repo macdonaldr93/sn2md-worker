@@ -35,6 +35,13 @@ def engine(tmp_path: Path) -> Iterator[Engine]:
     eng.dispose()
 
 
+@pytest.fixture(autouse=True)
+def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Freeze `now_utc()` in observability so `/readyz` decisions are
+    deterministic regardless of the calendar date CI happens to run on."""
+    monkeypatch.setattr("sn2md_worker.observability.now_utc", lambda: NOW)
+
+
 def _settings(*, webhook_url: str = "", status_enabled: bool = True) -> Settings:
     return Settings(
         webhook=WebhookConfig(url=webhook_url),

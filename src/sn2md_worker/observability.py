@@ -8,6 +8,7 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.exc import DatabaseError
 from sqlalchemy.orm import Session
 
+from sn2md_worker.clock import now_utc
 from sn2md_worker.config import get_settings
 from sn2md_worker.db import sql_session
 from sn2md_worker.startup_status import StepStatus, get_startup_status
@@ -132,7 +133,7 @@ async def readyz() -> Response:
         return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
     # Belt-and-suspenders vs. tz-naive datetimes: `UTCDateTime` re-attaches
     # UTC on read, so the row we just loaded is already aware. If a future
-    # schema change ever drops that, comparing against `datetime.now(UTC)`
+    # schema change ever drops that, comparing against `now_utc()`
     # would raise `TypeError`; normalizing here keeps `/readyz` behaving
     # (returning 503 for expired) instead of 500-ing.
     expires = (
@@ -140,7 +141,7 @@ async def readyz() -> Response:
         if channel.expires_at.tzinfo is not None
         else channel.expires_at.replace(tzinfo=UTC)
     )
-    if expires < datetime.now(UTC):
+    if expires < now_utc():
         return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
 
     return Response(status_code=status.HTTP_200_OK)

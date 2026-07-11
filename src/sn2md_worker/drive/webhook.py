@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import hmac
-from datetime import UTC, datetime
 
 from dbos import DBOS, SetEnqueueOptions
 from dbos._error import DBOSQueueDeduplicatedError  # noqa: PLC2701
 from fastapi import APIRouter, Request, Response, status
 
+from sn2md_worker.clock import now_utc
 from sn2md_worker.db import sql_session
 from sn2md_worker.logging import get_logger
 from sn2md_worker.state.models import DriveWatchChannel
@@ -77,7 +77,7 @@ def _authenticate(*, channel_id: str, token: str) -> bool:
         return False
     if channel is None:
         return False
-    if channel.expires_at <= datetime.now(UTC):
+    if channel.expires_at <= now_utc():
         return False
     # Constant-time compare so the shared secret can't be probed via
     # response-timing on the not-matching branch.

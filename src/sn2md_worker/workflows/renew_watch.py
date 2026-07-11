@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import secrets
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 import structlog
 from dbos import DBOS
 
+from sn2md_worker.clock import now_utc
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.db import sql_session
 from sn2md_worker.drive.client import DriveClient, DriveClientError, get_drive_client
@@ -40,7 +41,7 @@ def renew_watch_channel(scheduled_time: datetime, context: str) -> None:
         trigger_source=f"scheduled:{context}",
         drive=get_drive_client(),
         settings=get_settings(),
-        now=datetime.now(UTC),
+        now=now_utc(),
     )
 
 
@@ -108,7 +109,7 @@ def ensure_active_channel(drive: DriveClient | None, settings: Settings) -> None
         _log.warning("renew_watch_skipped", trigger="startup", reason="no_drive_client")
         return
 
-    now = datetime.now(UTC)
+    now = now_utc()
     with sql_session() as session:
         active = watch_channels.get_active(session)
 
@@ -229,5 +230,5 @@ def _current_or_fetch_page_token(drive: DriveClient) -> str:
             return record.page_token
     token = drive.get_start_page_token()
     with sql_session() as session, session.begin():
-        cursor.set_cursor(session, token, datetime.now(UTC))
+        cursor.set_cursor(session, token, now_utc())
     return token

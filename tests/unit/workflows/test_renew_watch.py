@@ -43,6 +43,14 @@ def settings() -> Settings:
 
 
 @pytest.fixture(autouse=True)
+def frozen_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Freeze `now_utc()` in `renew_watch` so `ensure_active_channel`'s
+    freshness check compares against a fixed instant instead of the
+    CI host's wall clock (which drifts past the fixture's `NOW + Nd`)."""
+    monkeypatch.setattr("sn2md_worker.workflows.renew_watch.now_utc", lambda: NOW)
+
+
+@pytest.fixture(autouse=True)
 def stable_channel_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
     """Freeze the channel_id UUID that `_create_and_activate` generates so
     the pre-persisted pending row and the follow-up `confirm` land on the
