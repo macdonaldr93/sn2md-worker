@@ -25,12 +25,15 @@ from sn2md_worker.workflows.queues import (
 __all__ = [
     "CONVERT_QUEUE_NAME",
     "DELETE_QUEUE_NAME",
+    "POLL_TRIGGER_FALLBACK",
     "poll_changes",
     "poll_changes_impl",
+    "scheduled_poll_changes",
     "seed_cursor",
 ]
 
 _NOTE_EXTENSION = ".note"
+POLL_TRIGGER_FALLBACK = "fallback"
 
 _log = get_logger("sn2md_worker.workflows.poll_changes")
 
@@ -42,6 +45,15 @@ def poll_changes(trigger_source: str) -> None:
         drive=get_drive_client(),
         settings=get_settings(),
     )
+
+
+@DBOS.workflow()
+def scheduled_poll_changes(scheduled_time: datetime, context: str) -> None:
+    """DBOS-scheduled fallback. Enqueue a poll onto poll_queue (rather
+    than running inline) so it serializes behind any webhook-triggered
+    poll instead of racing it on the shared cursor. The safety net for
+    push notifications Google dropped while the process stayed up."""
+    DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, POLL_TRIGGER_FALLBACK)
 
 
 def poll_changes_impl(

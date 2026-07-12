@@ -161,10 +161,18 @@ Some are user preferences saved to memory; some are project-specific:
 - `debounce_file` workflow — schema exists (`debounce_state` table +
   repo) but the workflow isn't built. Drive push notifications appear
   to only fire on completed uploads.
-- Fallback `poll_changes` cron — startup `backfill` + the cursor-expired
-  fallback in `poll_changes` (resets cursor via `get_start_page_token`
-  and enqueues a fresh `backfill`) + `ensure_active_channel`'s
-  recovery poll on boot together cover the "worker was down" case.
+- ~~Fallback `poll_changes` cron~~ — now implemented. The
+  `fallback-poll-changes` schedule (`register_schedules`) runs
+  `scheduled_poll_changes` on `settings.drive.fallback_poll_cron`
+  (default `*/5 * * * *`), enqueuing `poll_changes("fallback")`. This
+  covers the case the boot-time paths can't: the process stays up but
+  Google silently drops a push (or stops delivering to a still-valid
+  channel). The boot-time paths remain the "worker was down" cover:
+  startup `backfill`, the cursor-expired fallback in `poll_changes`
+  (resets cursor via `get_start_page_token` + enqueues a fresh
+  `backfill`), and `ensure_active_channel`'s recovery poll on boot.
+  Renewal also enqueues a catch-up `poll_changes("renewal")` when it
+  swaps an existing channel, closing the seam mid-swap.
 - Hash-first page cache (v1 keys on `(logical_key, page_index)` — a
   page inserted mid-note re-runs downstream pages through Gemini).
   Fixable with hash-first matching if it becomes painful.

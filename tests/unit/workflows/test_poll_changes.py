@@ -25,7 +25,11 @@ from sn2md_worker.workflows.delete_output import delete_output
 from sn2md_worker.workflows.poll_changes import (
     CONVERT_QUEUE_NAME,
     DELETE_QUEUE_NAME,
+    POLL_QUEUE_NAME,
+    POLL_TRIGGER_FALLBACK,
+    poll_changes,
     poll_changes_impl,
+    scheduled_poll_changes,
     seed_cursor,
 )
 
@@ -402,6 +406,25 @@ class TestWhenChangesListRejectsTheCursor:
         args, _ = enqueue.call_args
         assert args[0] == "poll_queue"
         assert args[1] is backfill
+
+
+class TestWhenTheFallbackScheduleFires:
+    def test_enqueues_a_fallback_poll_onto_the_poll_queue(self) -> None:
+        # GIVEN — the DBOS-scheduled fallback fires. We call `__wrapped__`
+        # (the undecorated body) because the `@DBOS.workflow()` wrapper
+        # guards against invocation before DBOS is launched, which never
+        # happens under unit tests.
+        with patch("sn2md_worker.workflows.poll_changes.DBOS.enqueue_workflow") as enqueue:
+            # WHEN
+            scheduled_poll_changes.__wrapped__(
+                scheduled_time=datetime(2026, 7, 12, 6, 0, tzinfo=UTC),
+                context="cron",
+            )
+
+        # THEN — a single poll is enqueued (not run inline) so it
+        # serializes behind any webhook-triggered poll on the cursor
+        enqueue.assert_called_once_with(POLL_QUEUE_NAME, poll_changes, POLL_TRIGGER_FALLBACK)
+        assert POLL_TRIGGER_FALLBACK == "fallback"
 
 
 class TestCursorSeeding:

@@ -89,6 +89,18 @@ def renew_watch_channel_impl(
                 _try_stop_channel(drive=drive, active=active)
 
             _create_and_activate(drive=drive, settings=settings, now=now, trigger=trigger_source)
+            if active is not None:
+                # We just replaced an existing channel. Enqueue a catch-up
+                # poll to cover the seam between the old channel's last
+                # delivered push and the new channel becoming active.
+                # First-ever channel creation (active is None) needs no
+                # catch-up: the startup backfill covers the initial state.
+                # At boot with an already-expired channel,
+                # ensure_active_channel also enqueues a "recovery" poll, so
+                # this path can enqueue a second poll then - harmless, since
+                # poll_queue runs at concurrency 1 and the follow-up poll is
+                # a cheap no-op once the cursor has advanced.
+                DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, "renewal")
             _log.info("renew_watch_succeeded")
         except Exception as exc:
             _log.error("renew_watch_failed", error=str(exc), exc_info=True)

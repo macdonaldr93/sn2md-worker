@@ -88,18 +88,27 @@ Queues (registered by `workflows.register_queues()` after
 - `poll_queue` — `worker_concurrency=1`. Serves `poll_changes` and
   `backfill`.
 
-Schedule (registered by `workflows.register_schedules()`):
+Schedules (registered by `workflows.register_schedules()`, each
+pre-checked idempotently via `DBOS.get_schedule`):
 
-- `renew-watch-channel` — cron `0 6 * * *` (daily 06:00 UTC).
+- `renew-watch-channel` — cron `0 6 * * *` (daily 06:00 UTC). Runs
+  `renew_watch_channel`.
+- `fallback-poll-changes` — cron from `settings.drive.fallback_poll_cron`
+  (default `*/5 * * * *`). Runs `scheduled_poll_changes`, which enqueues
+  `poll_changes("fallback")` onto `poll_queue`. The safety net for push
+  notifications Google silently dropped (or stopped delivering) while
+  the process stayed up — the one case the boot-time recovery paths
+  can't cover because there was never a restart.
 
 ## Startup helpers exposed by this package
 
 Called from `__main__.py` in order after `DBOS.launch()`:
 
 1. `register_queues()` — creates the three DBOS queues.
-2. `register_schedules()` — installs the daily cron; pre-checks via
-   `DBOS.get_schedule` before calling `create_schedule` so a re-boot
-   on the same DB is a no-op instead of raising.
+2. `register_schedules()` — installs the daily renewal cron and the
+   fallback poll cron; pre-checks each via `DBOS.get_schedule` before
+   calling `create_schedule` so a re-boot on the same DB is a no-op
+   instead of raising.
 3. `seed_cursor_if_ready(drive)` — writes an initial `drive_change_cursor`
    row from `get_start_page_token()` if none exists (dev-friendly:
    skips if DriveClient isn't available).
@@ -123,6 +132,17 @@ Called from `__main__.py` in order after `DBOS.launch()`:
   row — insert BEFORE the Drive call, `confirm` after — so a crash
   mid-renewal doesn't drop notifications. `RENEWAL_HEADROOM = 48h`
   gives the daily cron a two-day cushion.
+- **Renewal seam**: when `renew_watch_channel_impl` replaces an existing
+  channel (near-expiry or webhook-URL change) it enqueues a catch-up
+  `poll_changes("renewal")` so changes landing between the old channel's
+  last push and the new channel going active aren't lost. Skipped on
+  first-ever creation (`active is None`) since the startup backfill
+  already covers the initial state.
+- **Dropped push notifications**: the `fallback-poll-changes` cron polls
+  Drive on `settings.drive.fallback_poll_cron` regardless of channel
+  health, so a push Google silently dropped (or stopped delivering to a
+  still-valid channel) while the process stayed up self-heals within one
+  cron interval instead of stalling until the next restart.
 
 ## Deferred workflows
 

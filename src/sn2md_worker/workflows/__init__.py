@@ -7,6 +7,8 @@ correct order after `DBOS.launch()`.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from dbos import DBOS
 
 from sn2md_worker.config import Settings, get_settings
@@ -18,6 +20,7 @@ from sn2md_worker.workflows.delete_output import delete_output, delete_output_im
 from sn2md_worker.workflows.poll_changes import (
     poll_changes,
     poll_changes_impl,
+    scheduled_poll_changes,
     seed_cursor,
 )
 from sn2md_worker.workflows.queues import (
@@ -35,10 +38,12 @@ _log = get_logger("sn2md_worker.workflows")
 
 RENEW_SCHEDULE_NAME = "renew-watch-channel"
 RENEW_SCHEDULE_CRON = "0 6 * * *"  # daily at 06:00 UTC
+FALLBACK_POLL_SCHEDULE_NAME = "fallback-poll-changes"
 
 __all__ = [
     "CONVERT_QUEUE_NAME",
     "DELETE_QUEUE_NAME",
+    "FALLBACK_POLL_SCHEDULE_NAME",
     "POLL_QUEUE_NAME",
     "RENEW_SCHEDULE_CRON",
     "RENEW_SCHEDULE_NAME",
@@ -56,6 +61,7 @@ __all__ = [
     "register_schedules",
     "renew_watch_channel",
     "renew_watch_channel_impl",
+    "scheduled_poll_changes",
     "seed_cursor",
     "seed_cursor_if_ready",
 ]
@@ -82,19 +88,29 @@ def register_schedules() -> None:
     """Register DBOS schedules. Call after DBOS.launch().
 
     Idempotent — DBOS persists schedule rows in `workflow_schedules`, so
-    a second boot on the same DB already has our row. We pre-check via
+    a second boot on the same DB already has our rows. We pre-check via
     `DBOS.get_schedule` rather than catching a substring on `DBOSException`
     so a DBOS message-format change doesn't turn benign re-registration
-    into a boot failure. Changing the cron requires deleting the row
+    into a boot failure. Changing a cron requires deleting the row
     (or nuking the SQLite file).
     """
-    if DBOS.get_schedule(RENEW_SCHEDULE_NAME) is not None:
-        _log.info("schedule_already_registered", schedule_name=RENEW_SCHEDULE_NAME)
+    settings = get_settings()
+    _register_schedule(RENEW_SCHEDULE_NAME, renew_watch_channel, RENEW_SCHEDULE_CRON)
+    _register_schedule(
+        FALLBACK_POLL_SCHEDULE_NAME,
+        scheduled_poll_changes,
+        settings.drive.fallback_poll_cron,
+    )
+
+
+def _register_schedule(schedule_name: str, workflow_fn: Callable[..., None], schedule: str) -> None:
+    if DBOS.get_schedule(schedule_name) is not None:
+        _log.info("schedule_already_registered", schedule_name=schedule_name)
         return
     DBOS.create_schedule(
-        schedule_name=RENEW_SCHEDULE_NAME,
-        workflow_fn=renew_watch_channel,
-        schedule=RENEW_SCHEDULE_CRON,
+        schedule_name=schedule_name,
+        workflow_fn=workflow_fn,
+        schedule=schedule,
         context="cron",
     )
 

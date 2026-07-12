@@ -16,6 +16,8 @@ from sn2md_worker.drive.models import ChannelInfo
 from sn2md_worker.state import cursor, watch_channels
 from sn2md_worker.state.models import Base
 from sn2md_worker.state.watch_channels import NewWatchChannel
+from sn2md_worker.workflows.poll_changes import poll_changes
+from sn2md_worker.workflows.queues import POLL_QUEUE_NAME
 from sn2md_worker.workflows.renew_watch import (
     RENEWAL_HEADROOM,
     ensure_active_channel,
@@ -85,7 +87,8 @@ class TestWhenNoChannelExists:
         # GIVEN — no active channel, no cursor
 
         # WHEN
-        renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
+        with patch("sn2md_worker.workflows.renew_watch.DBOS.enqueue_workflow") as enqueue:
+            renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
 
         # THEN — a channel was created via Drive and marked active
         drive.watch_changes.assert_called_once()
@@ -95,6 +98,8 @@ class TestWhenNoChannelExists:
         # No ttl_seconds — we let Google pick its max (7 days) rather than
         # computing expiry from the local wall clock.
         assert "ttl_seconds" not in kwargs
+        # AND — no catch-up poll: first-ever creation has nothing to catch up.
+        enqueue.assert_not_called()
 
         with Session(engine) as session:
             active = watch_channels.get_active(session)
@@ -139,7 +144,8 @@ class TestWhenActiveChannelIsExpiringSoon:
             watch_channels.mark_active(session, "stale")
 
         # WHEN
-        renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
+        with patch("sn2md_worker.workflows.renew_watch.DBOS.enqueue_workflow") as enqueue:
+            renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
 
         # THEN — a new channel is created and is now active
         drive.watch_changes.assert_called_once()
@@ -147,6 +153,8 @@ class TestWhenActiveChannelIsExpiringSoon:
             active = watch_channels.get_active(session)
         assert active is not None
         assert active.channel_id == "new-channel"
+        # AND — a catch-up "renewal" poll covers the replacement seam
+        enqueue.assert_called_once_with(POLL_QUEUE_NAME, poll_changes, "renewal")
 
 
 class TestWhenActiveChannelIsFresh:
@@ -170,7 +178,8 @@ class TestWhenActiveChannelIsFresh:
             watch_channels.mark_active(session, "fresh")
 
         # WHEN
-        renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
+        with patch("sn2md_worker.workflows.renew_watch.DBOS.enqueue_workflow") as enqueue:
+            renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
 
         # THEN
         drive.watch_changes.assert_not_called()
@@ -178,6 +187,8 @@ class TestWhenActiveChannelIsFresh:
             active = watch_channels.get_active(session)
         assert active is not None
         assert active.channel_id == "fresh"
+        # AND — the early-return fresh path enqueues no catch-up poll
+        enqueue.assert_not_called()
 
 
 class TestWhenActiveChannelHasStaleWebhookUrl:
@@ -202,7 +213,8 @@ class TestWhenActiveChannelHasStaleWebhookUrl:
             watch_channels.mark_active(session, "stale-url")
 
         # WHEN — the settings now point at a new URL
-        renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
+        with patch("sn2md_worker.workflows.renew_watch.DBOS.enqueue_workflow") as enqueue:
+            renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
 
         # THEN — Drive is asked to stop the old channel and a new one is created
         drive.stop_channel.assert_called_once_with("stale-url", "res-old")
@@ -212,6 +224,8 @@ class TestWhenActiveChannelHasStaleWebhookUrl:
         assert active is not None
         assert active.channel_id == "new-channel"
         assert active.webhook_url == settings.webhook.url
+        # AND — a catch-up "renewal" poll covers the replacement seam
+        enqueue.assert_called_once_with(POLL_QUEUE_NAME, poll_changes, "renewal")
 
     def test_survives_a_drive_stop_failure_and_still_renews(
         self, engine: Engine, settings: Settings, drive: MagicMock
@@ -234,7 +248,8 @@ class TestWhenActiveChannelHasStaleWebhookUrl:
         drive.stop_channel.side_effect = DriveClientError("channels.stop failed")
 
         # WHEN
-        renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
+        with patch("sn2md_worker.workflows.renew_watch.DBOS.enqueue_workflow") as enqueue:
+            renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
 
         # THEN — the failure was swallowed, the new channel was still created
         drive.watch_changes.assert_called_once()
@@ -242,6 +257,64 @@ class TestWhenActiveChannelHasStaleWebhookUrl:
             active = watch_channels.get_active(session)
         assert active is not None
         assert active.channel_id == "new-channel"
+        # AND — a catch-up "renewal" poll still fires despite the stop failure
+        enqueue.assert_called_once_with(POLL_QUEUE_NAME, poll_changes, "renewal")
+
+
+class TestWhenReplacingAnExpiringChannel:
+    def test_enqueues_a_renewal_catch_up_poll(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — an active channel expiring within the renewal headroom
+        with Session(engine) as session, session.begin():
+            watch_channels.create(
+                session,
+                NewWatchChannel(
+                    channel_id="stale",
+                    resource_id="res-stale",
+                    token="stale-token",
+                    webhook_url=settings.webhook.url,
+                    expires_at=NOW + timedelta(hours=12),
+                    start_page_token="SPT-OLD",
+                    created_at=NOW - timedelta(days=6),
+                ),
+            )
+            watch_channels.mark_active(session, "stale")
+
+        # WHEN
+        with patch("sn2md_worker.workflows.renew_watch.DBOS.enqueue_workflow") as enqueue:
+            renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
+
+        # THEN — a single "renewal" catch-up poll covers the replacement seam
+        enqueue.assert_called_once_with(POLL_QUEUE_NAME, poll_changes, "renewal")
+
+
+class TestWhenReplacingAChannelWithAStaleUrl:
+    def test_enqueues_a_renewal_catch_up_poll(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — an active, still-fresh channel registered to a stale URL
+        with Session(engine) as session, session.begin():
+            watch_channels.create(
+                session,
+                NewWatchChannel(
+                    channel_id="stale-url",
+                    resource_id="res-old",
+                    token="old-token",
+                    webhook_url="https://old-ngrok.example.com/webhooks/drive",
+                    expires_at=NOW + timedelta(days=5),
+                    start_page_token="SPT-OLD",
+                    created_at=NOW - timedelta(days=1),
+                ),
+            )
+            watch_channels.mark_active(session, "stale-url")
+
+        # WHEN
+        with patch("sn2md_worker.workflows.renew_watch.DBOS.enqueue_workflow") as enqueue:
+            renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
+
+        # THEN — a single "renewal" catch-up poll covers the replacement seam
+        enqueue.assert_called_once_with(POLL_QUEUE_NAME, poll_changes, "renewal")
 
 
 class TestWhenWebhookUrlIsNotConfigured:
@@ -363,12 +436,14 @@ class TestEnsureActiveChannelWhenPreviousChannelHasExpired:
         with patch("sn2md_worker.workflows.renew_watch.DBOS.enqueue_workflow") as enqueue:
             ensure_active_channel(drive, settings)
 
-        # THEN — a `poll_changes("recovery")` was enqueued (via the
-        # POLL_QUEUE_NAME queue) to catch up on missed notifications
-        assert enqueue.call_count == 1
-        args, _ = enqueue.call_args
-        assert args[0] == "poll_queue"
-        assert args[2] == "recovery"
+        # THEN — two polls fire, both onto the POLL_QUEUE_NAME queue:
+        # ensure_active_channel enqueues a "recovery" poll for the missed
+        # notifications, and the impl enqueues a "renewal" catch-up poll
+        # because it replaced the expired channel (active is not None).
+        assert enqueue.call_count == 2
+        assert all(call.args[0] == "poll_queue" for call in enqueue.call_args_list)
+        triggers = {call.args[2] for call in enqueue.call_args_list}
+        assert triggers == {"recovery", "renewal"}
 
         # AND — the normal renewal flow still ran (new channel is active)
         with Session(engine) as session:
