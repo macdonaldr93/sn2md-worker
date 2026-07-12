@@ -30,6 +30,7 @@ able to start coding from here without re-litigating decisions.
     │  DBOS runtime (single SQLite file: workflow state  │
     │    + app tables via SQLAlchemyDatasource)          │
     │   ├── scheduled: renew_watch_channel (daily 06:00) │
+    │   ├── scheduled: scheduled_poll_changes (fallback) │
     │   ├── enqueued : poll_changes  (poll_queue,   c=1) │
     │   ├── enqueued : convert_note  (convert_queue,c=2) │
     │   ├── enqueued : delete_output (delete_queue, c=2) │
@@ -65,47 +66,59 @@ sn2md-worker/
 ├── src/sn2md_worker/
 │   ├── __init__.py
 │   ├── __main__.py                 # `python -m sn2md_worker` entrypoint
-│   ├── app.py                      # FastAPI app factory
+│   ├── app.py                      # FastAPI app factory + CorrelationIdMiddleware
+│   ├── clock.py                    # now_utc() wall-clock seam (tests monkeypatch it)
 │   ├── config.py                   # pydantic-settings, TOML + env, singleton
 │   ├── db.py                       # engine + SQLAlchemyDatasource singletons, sql_session()
-│   ├── logging.py                  # structlog + stdlib JSON setup
+│   ├── logging.py                  # structlog + stdlib JSON setup, HealthProbeAccessFilter
 │   ├── observability.py            # /healthz /readyz /status
+│   ├── startup_status.py           # boot-step outcomes surfaced at /status.startup
+│   ├── sources/
+│   │   ├── __init__.py
+│   │   ├── models.py               # NoteMetadata + ListedNote (source-neutral DTOs)
+│   │   └── protocol.py             # NoteSource Protocol + Source*Error hierarchy
 │   ├── drive/
 │   │   ├── __init__.py
-│   │   ├── client.py               # DriveClient wrapping google-api-python-client
-│   │   ├── models.py               # pydantic models for Drive resources
+│   │   ├── client.py               # DriveClient (implements NoteSource) over google-api-python-client
+│   │   ├── models.py               # ChangeEvent / ChangesPage / ChannelInfo (change-feed models)
 │   │   ├── paths.py                # resolve_source_path (parent chain walk)
 │   │   └── webhook.py              # /webhooks/drive route + token verify
 │   ├── conversion/
 │   │   ├── __init__.py
-│   │   ├── paths.py                # logical_key / basename / sn2md_output_dir / output_rel_path
-│   │   └── runner.py               # sn2md invocation + sidecar cleanup
+│   │   ├── multi_page.py           # per-page runner: extract, hash-first cache, Gemini
+│   │   └── paths.py                # logical_key / note_output_dir / output_rel_path
 │   ├── state/
 │   │   ├── __init__.py
-│   │   ├── conversions.py          # upsert / get / delete / list_recent / record_failure
+│   │   ├── conversions.py          # upsert / record_failure / mark_success / get / list
 │   │   ├── cursor.py               # singleton get / set_cursor
 │   │   ├── debounce.py             # record_probe / clear (workflow deferred)
 │   │   ├── models.py               # SQLAlchemy declarative + UTCDateTime TypeDecorator
+│   │   ├── page_conversions.py     # per-page rows backing the hash-first cache
 │   │   ├── schema.py               # init_schema
 │   │   └── watch_channels.py       # create / list / get_active / mark_active
 │   └── workflows/
-│       ├── __init__.py             # register_queues, register_schedules, seed_cursor_if_ready
+│       ├── __init__.py             # register_queues, register_schedules, startup helpers
 │       ├── backfill.py             # startup one-shot
 │       ├── convert_note.py
 │       ├── delete_output.py
-│       ├── poll_changes.py         # walks changes.list, dispatches per change
-│       └── renew_watch.py          # scheduled channel renewal
+│       ├── locks.py                # per-logical-key FileLock shared by convert + delete
+│       ├── poll_changes.py         # walks changes.list; scheduled_poll_changes fallback
+│       ├── queues.py               # queue-name constants (leaf module)
+│       └── renew_watch.py          # scheduled channel renewal + catch-up poll
 ├── tests/
-│   └── unit/                       # BDD scenario classes, 206 tests total
+│   └── unit/                       # BDD scenario classes; mirrors src layout
 │       ├── conversion/             # test_paths, test_multi_page
 │       ├── drive/                  # test_client, test_models, test_paths, test_webhook
+│       ├── sources/                # test_models, test_protocol
 │       ├── state/                  # test_conversions, test_watch_channels, test_cursor, test_debounce, test_schema, test_page_conversions
-│       ├── workflows/              # test_convert_note, test_poll_changes, test_delete_output, test_backfill, test_renew_watch, test_registration
+│       ├── workflows/              # test_convert_note, test_poll_changes, test_delete_output, test_backfill, test_renew_watch, test_registration, test_locks
+│       ├── test_logging.py
 │       ├── test_main.py
 │       └── test_observability.py
 ├── scripts/verify/                 # M0 gate scripts (Drive access, sn2md-Gemini)
 ├── docker/
-│   └── entrypoint.sh               # linuxserver-style PUID/PGID/TZ/UMASK handling
+│   ├── entrypoint.sh               # linuxserver-style PUID/PGID/TZ/UMASK handling
+│   └── obsidian-sync/              # companion sync image: Dockerfile + entrypoint.sh (see §10)
 ├── Dockerfile                      # python:3.11-slim + gosu + tzdata + uv sync
 ├── docker-compose.yml              # reference for local + Unraid
 ├── config.example.toml
@@ -115,7 +128,7 @@ sn2md-worker/
 ├── .pre-commit-config.yaml
 └── .github/workflows/
     ├── ci.yml                      # ruff + mypy + pytest + docker build verify
-    └── release.yml                 # multi-arch GHCR publish on main + tags
+    └── release.yml                 # multi-arch GHCR publish (worker + obsidian-sync)
 ```
 
 ## 3. External dependencies
@@ -209,18 +222,21 @@ place (see §4a).
 | source_path       | TEXT     | Full Drive path (folder chain / name)                                                                          |
 | source_md5        | TEXT     | md5Checksum from Drive metadata                                                                                |
 | output_rel_path   | TEXT     | Path relative to `/vault`                                                                                      |
-| last_status       | TEXT     | SUCCESS \| ERROR \| SKIPPED                                                                                    |
+| last_status       | TEXT     | PENDING \| SUCCESS \| ERROR \| SKIPPED                                                                         |
 | last_converted_at | DATETIME |                                                                                                                |
 | attempts          | INTEGER  |                                                                                                                |
 | last_error        | TEXT     | Nullable, last error message                                                                                   |
 
 An index on `current_file_id` lets `delete_output` find a record from a
-removed change event.
+removed change event. `PENDING` is written before a conversion starts
+downloading (see §5.4): a crash mid-convert leaves a visible `PENDING`
+row (surfaced by `/status.recent_pending`), and the retry treats the
+note as stale because the up-to-date check requires `SUCCESS`.
 
 **`page_conversions`** — one row per converted `.note` page, keyed on
 `(logical_key, page_index)`. Used by the multi-page runner to skip
-Gemini calls for pages whose PNG hash hasn't changed since last
-convert.
+Gemini calls for pages whose PNG hash has already been transcribed
+(lookup is hash-first; see §6).
 
 | column            | type     | notes                                               |
 | ----------------- | -------- | --------------------------------------------------- |
@@ -262,9 +278,15 @@ convert.
 
 Every workflow is a thin `@DBOS.workflow()` wrapper that delegates to a
 plain `<name>_impl(...)` function — the impl takes injected dependencies
-(`drive`, `settings`, sometimes `now`) so tests bypass DBOS entirely.
-All impls follow the same log discipline: `_started`, `_succeeded` /
-`_failed` / `_skipped(reason=…)` — see §14.
+plus `settings` (sometimes `now`) so tests bypass DBOS entirely. The
+conversion-side impls (`convert_note`, `delete_output`, `backfill`)
+take `source: NoteSource`, the ingestion seam from `sources/` (see §7);
+the wrapper is the composition point that passes `get_drive_client()`
+as `source=`. `poll_changes` and `renew_watch_channel` keep taking
+`drive: DriveClient` on purpose: the change-feed/watch machinery is
+Drive infrastructure that would be deleted, not abstracted, if a local
+source ever replaced Drive. All impls follow the same log discipline:
+`_started`, `_succeeded` / `_failed` / `_skipped(reason=…)` — see §14.
 
 Queues (registered after `DBOS.launch()`, names in
 `workflows/queues.py`):
@@ -276,16 +298,24 @@ Queues (registered after `DBOS.launch()`, names in
 - `poll_queue` — `worker_concurrency=1`. Serves `poll_changes` and
   `backfill`.
 
-Schedule (registered after `DBOS.launch()`; the register step
-pre-checks via `DBOS.get_schedule` so re-boots on the same DB are a
-no-op):
+Schedules (registered after `DBOS.launch()`; the register step
+pre-checks each via `DBOS.get_schedule` so re-boots on the same DB are
+a no-op):
 
-- `renew-watch-channel` — cron `0 6 * * *` (daily 06:00 UTC).
+- `renew-watch-channel` — cron `0 6 * * *` (daily 06:00 UTC). Runs
+  `renew_watch_channel`.
+- `fallback-poll-changes`: cron from `settings.drive.fallback_poll_cron`
+  (default `*/5 * * * *`). Runs `scheduled_poll_changes`, which enqueues
+  `poll_changes("fallback")` onto `poll_queue` so it serializes behind
+  any webhook-triggered poll instead of racing it on the shared cursor
+  (see §5.2).
 
-`convert_note` acquires a `filelock.FileLock` keyed on a SHA-256 of
-`logical_key` (lockfiles under `/tmp/sn2md-worker-locks/`) before
-touching the vault — a per-key mutex that serializes concurrent
-conversions of the same note across workers.
+`convert_note` and `delete_output` both acquire a `filelock.FileLock`
+via `workflows/locks.lock_for`, keyed on a SHA-256 of `logical_key`
+(lockfiles under `/tmp/sn2md-worker-locks/`), before touching the
+vault — a per-key mutex that serializes concurrent conversions of the
+same note across workers and keeps a stale delete from rmtree-ing
+under an in-flight convert.
 
 ### 5.1 `renew_watch_channel` — scheduled daily
 
@@ -296,9 +326,14 @@ def renew_watch_channel(scheduled_time: datetime, context: str) -> None:
         trigger_source=f"scheduled:{context}",
         drive=get_drive_client(),
         settings=get_settings(),
-        now=datetime.now(UTC),
+        now=now_utc(),
     )
 ```
+
+(`now_utc()` is the `clock.py` seam: a single wall-clock accessor that
+tests monkeypatch to a fixed instant. Everything that compares against
+a persisted timestamp (channel expiry, renewal headroom, `/readyz`,
+webhook auth) goes through it.)
 
 `renew_watch_channel_impl` decides to renew when any of the following
 holds:
@@ -315,15 +350,24 @@ it's a **two-phase** flow to survive a crash between Drive and the DB
 write:
 
 1. Insert a _pending_ row (channel_id + token + placeholder
-   `resource_id=""`, placeholder `expires_at=now`) BEFORE calling
-   Drive. If we crash after Drive succeeds but before we commit the
-   real values, the pending row still lets incoming webhook pushes
-   authenticate.
+   `resource_id=""`, placeholder `expires_at = now + 7 days`, Drive's
+   default TTL) BEFORE calling Drive. If we crash after Drive succeeds
+   but before we commit the real values, the pending row still lets
+   incoming webhook pushes authenticate; the 7-day placeholder keeps
+   the webhook's expiry check from rejecting pushes that arrive
+   between phase 1 and phase 2.
 2. Call `drive.watch_changes(...)` — we don't pass `expiration`, so
    Drive picks its own max (avoids host-clock skew).
 3. On success: `confirm` the row with Drive's real `resource_id` and
    `expires_at`, then `mark_active`. On failure: `delete_by_id` rolls
    the pending row back.
+
+When the renewal replaced an existing channel (near-expiry or URL
+change), it also enqueues a catch-up `poll_changes("renewal")` on
+`poll_queue`, covering the seam between the old channel's last
+delivered push and the new channel going active. First-ever creation
+(`active is None`) skips the catch-up: the startup backfill already
+covers the initial state.
 
 Startup helper `ensure_active_channel(drive, settings)` delegates to
 the same impl with `trigger_source="startup"` and additionally enqueues
@@ -365,9 +409,15 @@ last-saved cursor.
 window), we reset via `get_start_page_token`, enqueue `backfill`, and
 return cleanly.
 
-**No fallback poll cron.** Startup backfill + the cursor-expired
-fallback + `ensure_active_channel`'s recovery poll on boot together
-cover the "worker was down" case.
+**Fallback poll cron** (shipped 2026-07-12): the
+`fallback-poll-changes` schedule runs `scheduled_poll_changes` on
+`settings.drive.fallback_poll_cron` (default `*/5 * * * *`), which
+enqueues `poll_changes("fallback")` onto `poll_queue`. This covers the
+one case the boot-time paths can't: the process stays up but Google
+silently drops a push (or stops delivering to a still-valid channel).
+Startup backfill + the cursor-expired fallback above +
+`ensure_active_channel`'s recovery poll on boot remain the
+"worker was down" cover.
 
 ### 5.3 `debounce_file` — DEFERRED
 
@@ -385,7 +435,7 @@ conversions.
 def convert_note(file_id: str, source_path: str) -> None:
     convert_note_impl(
         file_id=file_id, source_path=source_path,
-        drive=get_drive_client(), settings=get_settings(),
+        source=get_drive_client(), settings=get_settings(),
     )
 ```
 
@@ -394,29 +444,35 @@ def convert_note(file_id: str, source_path: str) -> None:
 1. Compute `logical_key(source_path)` — raises `UnsafePathError` on
    `..`, NUL, empty segments, or Windows-reserved names, which is
    log-skipped (DBOS won't retry).
-2. Acquire a per-key `FileLock` (SHA-256 of `logical_key`, lockfile
-   under `/tmp/sn2md-worker-locks/`) — serializes concurrent
-   conversions of the same note.
-3. `drive.get_metadata(file_id)` — early return if trashed.
+2. Acquire the per-key `FileLock` (`workflows/locks.lock_for`, shared
+   with `delete_output`) BEFORE the up-to-date check, so two workers
+   can't both observe "stale" and both re-run.
+3. `source.get_metadata(file_id)` — early return if trashed.
 4. Idempotency check: if `conversion_records[logical_key]` has matching
    `source_md5`, `SUCCESS` status, and same `current_file_id`, skip.
 5. Load per-page state: `page_conversions.list_for_note(session, key)` →
    `{page_index: page_md5}` dict.
-6. `drive.download(file_id, tmp_dir, name)` → chunked
+6. Upsert the conversion record as `PENDING` before downloading:
+   crash-visible to `/status.recent_pending`, and a retry treats the
+   note as stale instead of up-to-date.
+7. `source.download(file_id, tmp_dir, name)` → chunked
    `MediaIoBaseDownload` streaming; retried at whole-download level via
    tenacity.
-7. `note_output_dir(source_path, vault_root)` gives the per-note vault
+8. `note_output_dir(source_path, vault_root)` gives the per-note vault
    folder (`<vault>/<parents>/<basename>/`).
-8. `run_multi_page(...)` — extracts PNGs (sorted numerically by the
-   first int in each filename), reads each PNG into memory once
-   (hash+copy in a single pass), calls Gemini via tenacity-wrapped
-   retry only for pages whose hash doesn't match the cache. Writes
-   `page-NN.md` + `page-NN.png` per page and an `index.md`. See §6.
-9. Upsert `conversion_records` with new md5, `parent_folder_id`, output
-   path, and `SUCCESS`. Upsert one `page_conversions` row per current
-   page. Delete `page_conversions` rows for indexes ≥ current page
-   count (pages removed from the note).
-10. Sweep the note folder: remove stale `page-NN.md` / `page-NN.png`
+9. `run_multi_page(...)` — extracts PNGs (sorted numerically by the
+   first int in each filename), hashes each page, and reuses prior
+   page bodies hash-first (see §6): Gemini runs only for hashes never
+   transcribed before, via tenacity-wrapped retry. Writes
+   `page-NN.md` + `page-NN.png` per page and an `index.md`, firing
+   `on_page_done` after each page so the workflow upserts that page's
+   `page_conversions` row immediately: a crash mid-note resumes
+   without re-transcribing completed pages.
+10. Finalize: `conversions.mark_success` (an UPDATE, not a second
+    upsert, so `attempts` isn't double-counted) and delete
+    `page_conversions` rows for indexes ≥ current page count (pages
+    removed from the note).
+11. Sweep the note folder: remove stale `page-NN.md` / `page-NN.png`
     for dropped pages (both `.md` and PNG-only orphans) plus the
     legacy flat `<basename>.md` / `.sn2md.metadata.yaml` from
     pre-multi-page installs.
@@ -424,29 +480,34 @@ def convert_note(file_id: str, source_path: str) -> None:
 Any uncaught exception is logged as `convert_note_failed` (with
 traceback) and re-raised so DBOS records the workflow as ERROR.
 
-### 5.5 `delete_output` — per-file, `convert_queue`
+### 5.5 `delete_output` — per-file, `delete_queue` (filelock-serialized)
 
 ```python
 @DBOS.workflow()
 def delete_output(file_id: str) -> None:
-    delete_output_impl(file_id=file_id, drive=..., settings=...)
+    delete_output_impl(file_id=file_id, source=..., settings=...)
 ```
 
 `delete_output_impl` handles Supernote's replace-then-delete semantics:
 
 1. Look up `conversion_records` by `current_file_id`. No record → no-op.
-2. If the record has a `parent_folder_id`, call
-   `drive.find_live_note(parent_folder_id, source_name)`. If a live
+2. Acquire the per-key `FileLock` for the record's `logical_key`
+   (`workflows/locks.lock_for`, shared with `convert_note`) and
+   re-read the record inside the lock: the decisive read serializes
+   against an in-flight conversion of the same note.
+3. If the record has a `parent_folder_id`, call
+   `source.find_live_note(parent_folder_id, source_name)`. If a live
    file with the same name exists at that location with a different
    id, **re-point** `current_file_id` to it (the newer Supernote-side
    upload) via `conversions.set_current_file_id`, **enqueue a
    follow-up `convert_note(live.id, source_path)`** on
    `CONVERT_QUEUE_NAME` (in case `poll_changes` never saw the
    create-side push), and skip the vault delete.
-3. Otherwise: `_delete_from_vault(output_rel_path, vault_root)` — a
+4. Otherwise: `_delete_from_vault(output_rel_path, vault_root)` — a
    guarded `shutil.rmtree` that refuses empty paths, paths that resolve
    outside `vault_root`, or `vault_root` itself.
-4. Delete the record.
+5. Delete the conversion record and all of its `page_conversions`
+   rows.
 
 The `find_live_note` lookup is a single `files.list` call with
 `q="name = '<x>' and trashed = false and '<parent_folder_id>' in parents"`.
@@ -459,16 +520,18 @@ and control chars could inject.
 ```python
 @DBOS.workflow()
 def backfill() -> None:
-    backfill_impl(drive=get_drive_client(), settings=get_settings())
+    backfill_impl(source=get_drive_client(), settings=get_settings())
 ```
 
-Iterates `drive.list_all_notes(source_folder_id)` which depth-first
-walks the source folder tree and yields `(FileMetadata, source_path)`
-for every `.note`. **All conversion records are loaded once up front**
-via `conversions.list_all_by_key(session)` — the per-file check is a
-Python dict lookup, not another SQLite hit. For each: if no matching
-`logical_key`, or the stored md5 differs, or `last_status != SUCCESS`,
-enqueue `convert_note`.
+Iterates `source.list_all_notes(source_folder_id)`, which depth-first
+walks the source folder tree and yields a `ListedNote(metadata,
+source_path)` for every `.note`. **All conversion records are loaded
+once up front** via `conversions.list_all_by_key(session)` — the
+per-file check is a Python dict lookup, not another SQLite hit. For
+each: if no matching `logical_key`, or the stored md5 differs, or
+`last_status != SUCCESS`, enqueue `convert_note`. A path that fails
+`logical_key`'s safety checks is logged and counted (`unsafe`) without
+aborting the walk.
 
 Enqueued at startup via `workflows.enqueue_startup_backfill()` (only if
 a `DriveClient` was successfully initialized), and re-enqueued by
@@ -501,18 +564,25 @@ Output shape per note (under `note_output_dir(source_path, vault_root)`):
 ```
 <basename>/
 ├── index.md          # Obsidian wikilinks: [[page-01]], [[page-02]], ...
-├── page-01.md        # frontmatter (page, of, tags) + Gemini output + image link
+├── page-01.md        # frontmatter (created, tags, page, of) + Gemini output + image link
 ├── page-01.png
 ├── page-02.md
 ├── page-02.png
 ```
 
-Caching: `run_multi_page` extracts + hashes every page, looks up
-`existing_pages[i]` (loaded from `page_conversions`), and calls Gemini
-only when the hash differs. Cached pages keep their existing
-`page-NN.md` on disk untouched; the runner still returns a
-`PageOutcome(was_cached=True)` so callers see the full page list. Result
-counters (`gemini_calls`, `cache_hits`) get logged as
+Caching (hash-first since 2026-07-05): `run_multi_page` extracts +
+hashes every page, then looks each hash up in an index of prior page
+bodies (`_preload_cached_bodies`) built in two passes: DB-known
+`page_conversions` rows keyed by their recorded md5, plus orphan
+`page-NN.md` files on disk keyed by the sibling PNG's md5 (covers a
+crash between the `.md` write and the DB upsert). Gemini runs only for
+hashes never transcribed before; a matching body is reused regardless
+of which index it previously lived at. Page files are rewritten
+unconditionally (a cache hit at a shifted index still needs output at
+the new slot), and `on_page_done` fires per page so the caller can
+persist progress incrementally. Cache hits surface as
+`PageOutcome(was_cached=True)` so callers see the full page list;
+result counters (`gemini_calls`, `cache_hits`) get logged as
 `convert_note_succeeded` fields.
 
 **Notes / gotchas**:
@@ -523,11 +593,11 @@ counters (`gemini_calls`, `cache_hits`) get logged as
   install, `_cleanup_stale_pages` deletes it on the next convert.
 - **Legacy flat `<basename>.md`** — same story. Removed on next
   convert.
-- **Page reordering** — v1 keys the cache on
-  `(logical_key, page_index)`. If you insert a page at position 2,
-  pages 2..N re-run through Gemini because their hashes don't match
-  the neighbors they've been compared to. Fixable by hash-first
-  matching if this becomes painful; deferred.
+- **Page reordering** — solved by the hash-first cache (2026-07-05).
+  The `page_conversions` table still keys rows on
+  `(logical_key, page_index)`, but body lookup is by page hash: a page
+  inserted at position 2 costs one Gemini call for the new page, and
+  pages 2..N reuse their cached bodies at their shifted indexes.
 - **Model string**: use `gemini/gemini-2.5-pro` (with prefix). Verified
   2026-07-04 that the unprefixed `gemini-2.5-pro` doesn't resolve via
   `llm-gemini` 0.32+.
@@ -542,6 +612,20 @@ Wraps `googleapiclient.discovery.build("drive", "v3", ...)` with a service
 account credential. Scope: `https://www.googleapis.com/auth/drive.readonly`
 (we never write to Drive).
 
+**NoteSource seam** (added 2026-07-12). `DriveClient` is the sole
+implementation of the runtime-checkable `sources.NoteSource` Protocol:
+`list_all_notes`, `get_metadata`, `download`, and `find_live_note` form
+the surface the conversion workflows depend on, expressed in the
+source-neutral DTOs from `sources/models.py`: `NoteMetadata` (the
+renamed `drive/models.FileMetadata`; Drive's camelCase aliases still
+map onto it) and `ListedNote(metadata, source_path)` (replacing the
+old `(FileMetadata, str)` tuple yield). A `_note_source_conformance`
+helper in `drive/client.py` fails mypy if the class drifts from the
+protocol. The change-feed and watch machinery (`changes_list`,
+`watch_changes`, `stop_channel`, `get_start_page_token`) deliberately
+sits outside the seam: if a local source ever replaces Drive, that
+machinery gets deleted, not reimplemented.
+
 **Retry + error taxonomy**. All `.execute()` calls are routed through
 `_call` → `_invoke_with_drive_retry` (tenacity, 3 attempts, exponential
 backoff with jitter, retries 429/5xx + `ServerNotFoundError`/`SSLError`/
@@ -552,18 +636,23 @@ backoff with jitter, retries 429/5xx + `ServerNotFoundError`/`SSLError`/
   counts as transient). Callers can log-skip.
 - `DriveTransientError` — 5xx after retries + all transport errors.
   Callers let it propagate so DBOS retries.
-- Both subclass `DriveClientError` for backwards-compatible catches.
+- Both subclass `DriveClientError` for backwards-compatible catches,
+  and the hierarchy multiply-inherits from the source-neutral
+  exceptions in `sources/protocol.py`: `DriveClientError` extends
+  `SourceError`, `DrivePermanentError` extends `SourcePermanentError`,
+  `DriveTransientError` extends `SourceTransientError`. Seam'd callers
+  catch the `Source*` types without knowing the backend.
 
 Public methods on `DriveClient`:
 
-- `get_metadata(file_id, fields=DEFAULT_FILE_FIELDS) → FileMetadata`
+- `get_metadata(file_id, fields=DEFAULT_FILE_FIELDS) → NoteMetadata`
 - `get_start_page_token() → str`
 - `download(file_id, dest_dir, name) → Path` — chunked stream via
   `MediaIoBaseDownload` (4 MB chunks); truncate-and-restart on retry.
-- `list_all_notes(folder_id) → Iterator[(FileMetadata, source_path)]` —
+- `list_all_notes(folder_id) → Iterator[ListedNote]` —
   depth-first walk; per-folder listing dedupes file ids across pages
   (Drive can return the same id twice under concurrent edits).
-- `find_live_note(parent_folder_id, name) → FileMetadata | None` — scoped
+- `find_live_note(parent_folder_id, name) → NoteMetadata | None` — scoped
   `files.list` with `q="name = '<x>' and trashed = false and '<pid>' in parents"`.
   Refuses non-printable names (`str.isprintable()`).
 - `watch_changes(webhook_url, channel_id, token, start_page_token) → ChannelInfo` —
@@ -620,12 +709,16 @@ not want to leverage that (we have our own poller for catch-up).
 See [`config.example.toml`](../config.example.toml) for the canonical
 layout. Sections:
 
-- `[drive]` — `source_folder_id`, debounce timing knobs (currently
-  unused; kept for the deferred `debounce_file` workflow)
+- `[drive]` — `source_folder_id`, `fallback_poll_cron` (default
+  `*/5 * * * *`; drives the `fallback-poll-changes` schedule, §5.2),
+  debounce timing knobs (currently unused; kept for the deferred
+  `debounce_file` workflow)
 - `[vault]` — `root_path`, `mirror_source_layout`
 - `[sn2md]` — `model` (default `gemini/gemini-2.5-pro`), `api_key`
-  (SecretStr, optional). `workflows.convert_note._resolve_gemini_key`
-  prefers this then falls back to the `LLM_GEMINI_KEY` env var.
+  (SecretStr, optional), `prompt` (optional full-prompt override, §6;
+  must keep the `{context}` placeholder).
+  `workflows.convert_note._resolve_gemini_key`
+  prefers `api_key` then falls back to the `LLM_GEMINI_KEY` env var.
 - `[queue]` — `convert_concurrency` (default 2)
 - `[observability]` — `log_level`, `status_endpoint_enabled`
 - `[database]` — `url` (single SQLite/Postgres URL; DBOS + app tables
@@ -674,10 +767,38 @@ pipefail` instead of swallowed — a read-only mount or full disk
 - [`.env.example`](../.env.example) — required env vars and
   linuxserver-style knobs.
 
-**Published image**: `ghcr.io/macdonaldr93/sn2md-worker:latest` (also
+**Published images**: `ghcr.io/macdonaldr93/sn2md-worker:latest` and
+`ghcr.io/macdonaldr93/sn2md-worker/obsidian-sync:latest` (also
 `sha-<short>` and semver tags). Multi-arch: `linux/amd64` +
-`linux/arm64`. Built by `.github/workflows/release.yml` on push to main
-and semver tags.
+`linux/arm64`. Both built by `.github/workflows/release.yml` on push
+to main and semver tags.
+
+### Companion image: obsidian-sync
+
+Built from [`docker/obsidian-sync/`](../docker/obsidian-sync/Dockerfile):
+`node:22-alpine` + the `obsidian-headless` CLI (`ob`) under `tini`,
+watching the same `/vault` bind mount and pushing changes out via
+Obsidian Sync. Design points (all shipped by 2026-07-12):
+
+- **Fixed non-root user `99:100`** (Unraid's `nobody:users`), baked at
+  build time. No linuxserver baseimage, no PUID/PGID reshaping, no s6:
+  the container never runs as root, and both writable mounts
+  (`/config`, `/vault`) must be owned `99:100` on the host.
+  `HOME=/config` pins all `ob` auth/state into the volume.
+- **Env-driven auto-configuration** in the entrypoint: first boot runs
+  `ob login` from `OBSIDIAN_EMAIL` / `OBSIDIAN_PASSWORD` (optional
+  `OBSIDIAN_MFA`), then `ob sync-setup` pairs `/vault` against the
+  remote vault named by `OBSIDIAN_VAULT` with
+  `OBSIDIAN_ENCRYPTION_PASSWORD`. Missing env vars idle the container
+  with an instructive log line instead of crashlooping.
+- **Stale `.sync.lock` clearing**: `obsidian-headless` treats a recent
+  `/vault/.obsidian/.sync.lock/` as "another instance is running"; a
+  back-to-back setup-then-sync or a hard container kill trips that
+  check, so the entrypoint removes a leftover lock before
+  `exec ob sync --continuous` (safe: this container is the only sync
+  runner in the deployment).
+
+Operational setup lives in `docs/unraid-runbook.md` §2.
 
 ### Volumes (defaults)
 
@@ -748,7 +869,7 @@ LAN-only or behind reverse-proxy auth.
 
 | Scenario                              | Recovery                                                                                                                                               |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Webhook missed (network glitch)       | Next container restart runs `backfill`, picks up whatever changed. Fallback `poll_changes` cron is deferred (see §5.2).                                |
+| Webhook missed (network glitch)       | The fallback `poll_changes` cron (§5.2) catches it within one interval (default 5 min); a restart also runs `backfill`.                                |
 | Container restart mid-conversion      | DBOS resumes workflow from last step                                                                                                                   |
 | Watch channel expires without renewal | Daily `renew_watch_channel` cron creates a fresh channel; cursor preserves continuity between old and new channel                                      |
 | Webhook URL changed (ngrok, DNS)      | `renew_watch_channel_impl` sees `webhook_url != settings.webhook.url` on next fire, calls `drive.stop_channel` on the old channel, creates a new one   |
@@ -787,6 +908,7 @@ LAN-only or behind reverse-proxy auth.
         "last_error": "..."
       }
     ],
+    "recent_pending": [],
     "watch_channel": {
       "channel_id": "...",
       "resource_id": "...",
@@ -810,6 +932,9 @@ LAN-only or behind reverse-proxy auth.
     }
   }
   ```
+  `recent_pending` lists `PENDING` conversion records: in-flight
+  converts, plus crash-stuck ones (a row that lingers here means a
+  convert wrote `PENDING` and never finalized).
   `queue_depth` and `backfill` are read via raw SQL against DBOS's own
   `workflow_status` table (`observability._query_queue_depth` /
   `_query_backfill_status`). If the table is missing (early test setup,
@@ -839,6 +964,15 @@ consistent across the codebase):
 Log levels: INFO for happy path, WARNING for graceful degradation
 (config missing, safety guard tripped), ERROR for failures.
 
+**Health-probe access-log suppression.** `configure_logging` attaches
+`HealthProbeAccessFilter` (in `logging.py`) to uvicorn's
+`uvicorn.access` logger: access records for successful `GET /healthz`
+and `GET /readyz` requests are dropped, so a 30-second container
+healthcheck doesn't flood the JSON log. Failed probes (status 400 and
+up) and all other traffic keep logging, and any record that doesn't
+match uvicorn's five-argument access format is kept (fail open), so a
+uvicorn upgrade can't silently eat access logs.
+
 ### Correlation IDs
 
 Every log line inside a request or workflow scope carries context that
@@ -864,8 +998,9 @@ originating `request_id` is a future addition.
 
 ## 15. Testing strategy
 
-**206 unit tests**, in-memory SQLite. All tests live under
-`tests/unit/` mirroring the source layout (per-project convention).
+**261 unit tests** (as of 2026-07-12), in-memory SQLite. All tests
+live under `tests/unit/` mirroring the source layout (per-project
+convention).
 Two shapes:
 
 - **BDD scenario classes** for behavior — `TestWhen<Scenario>` with
@@ -878,8 +1013,11 @@ Two shapes:
 
 External dependencies are patched at the call boundary:
 
-- `DriveClient` — `MagicMock(spec=DriveClient)`, per-method return
-  values / side effects.
+- Note source: the seam'd workflow tests (`convert_note`,
+  `delete_output`, `backfill`) use `MagicMock(spec=NoteSource)`;
+  `poll_changes` / `renew_watch` tests use
+  `MagicMock(spec=DriveClient)`. Per-method return values / side
+  effects set inside `# GIVEN`.
 - `run_multi_page` — `patch("sn2md_worker.workflows.convert_note.run_multi_page")`
   in the workflow tests. `test_multi_page.py` patches sn2md's
   `NotebookExtractor.extract_images` and `image_to_markdown` directly.
@@ -903,6 +1041,10 @@ Drive + Gemini is via `scripts/verify/`.
 4. **sn2md-as-library end-to-end** — ✅ Resolved 2026-07-04.
    `import_supernote_file_core` with `model="gemini/gemini-2.5-pro"` +
    `LLM_GEMINI_KEY` produces sensible Markdown. ~7.5s/page baseline.
+   (The verify script exercises sn2md's high-level single-file
+   wrapper; the shipped worker drives the per-page primitives
+   instead, see §6. Both scripts stay useful as smoke tests if the
+   setup ever needs re-verification.)
 5. **Webhook reachability from Google** — pending real-world deploy
    (needs DNS + reverse proxy on Unraid). The webhook handler,
    authentication, and enqueue path are all unit-tested; the missing
@@ -925,14 +1067,50 @@ Drive + Gemini is via `scripts/verify/`.
 
 ### Remaining polish (not blocking)
 
-- Multi-arch image published (needs a push to GitHub with the release
-  workflow in place).
-- Hash-first page cache — v1 keys on `(logical_key, page_index)`, so
-  a page inserted mid-note re-runs downstream pages through Gemini.
+Still outstanding as of 2026-07-12:
+
 - Correlation id propagation across the DBOS enqueue boundary
   (webhook → poll_changes worker → convert_note worker). Today those
   cross with `file_id` / `logical_key`, not with the originating
   `request_id`.
+- Webhook reachability from Google in the real deployment (§16 item 5)
+  still needs the production DNS + reverse-proxy confirmation.
+- `debounce_file` stays deferred by choice (§5.3): schema + repo exist,
+  the workflow doesn't, because Drive push appears to fire only on
+  completed uploads.
+
+Done since this list was written:
+
+- Multi-arch images published: `release.yml` builds both
+  `sn2md-worker` and `obsidian-sync` for `linux/amd64` +
+  `linux/arm64` on every push to main and semver tags (§10).
+- Hash-first page cache: shipped 2026-07-05 with mid-note crash
+  resume (§5.4 steps 6 and 9, §6). The old "inserted page re-runs
+  downstream pages" limitation is gone.
+
+### Shipped after M4 (2026-07-05 through 2026-07-12)
+
+- Mid-note crash resume + hash-first page cache (2026-07-05):
+  `PENDING` status, per-page persistence via `on_page_done`, body
+  reuse keyed on page hash, shared per-key locks in
+  `workflows/locks.py` (§5.4, §5.5, §6).
+- Two-phase renewal placeholder fix: the pending channel row carries
+  `expires_at = now + 7 days` so webhook auth accepts pushes during
+  the phase-1 to phase-2 window (§5.1).
+- Startup status reporting: `/status.startup` surfaces per-boot-step
+  outcomes from the `startup_status` singleton (§14), plus the Unraid
+  runbook and obsidian-sync deployment docs.
+- obsidian-sync image hardening (2026-07-11 and 2026-07-12): fixed
+  `99:100` non-root user replacing the linuxserver-style baseimage,
+  env-driven login/vault pairing (`OBSIDIAN_*`), stale `.sync.lock`
+  clearing (§10).
+- `now_utc()` clock seam in `clock.py` (2026-07-11): single wall-clock
+  accessor so time-sensitive checks stay deterministic in tests (§5.1).
+- Fallback poll cron + renewal catch-up poll (2026-07-12): §5.1, §5.2.
+- NoteSource ingestion seam (2026-07-12): `sources/` package;
+  `convert_note` / `delete_output` / `backfill` depend on the protocol
+  rather than on `DriveClient` (§5, §7).
+- Health-probe access-log suppression (2026-07-12): §14.
 
 ### Hardening shipped in the audit pass (2026-07-05)
 
@@ -945,13 +1123,15 @@ Load-bearing subsystems worth naming; each one has its own tests:
   DBOS's `db_engine_kwargs` so its internal engines are threadpool-safe.
 - **Atomic upserts**: every write in `state/*` is a single SQLite
   `INSERT ... ON CONFLICT DO UPDATE` — no get-then-set race.
-- **Per-key filelock**: `convert_note` acquires a `filelock.FileLock`
-  keyed on a SHA-256 of `logical_key` (lockfiles under
-  `/tmp/sn2md-worker-locks/`) so concurrent conversions of the same
-  note serialize cleanly across workers.
-- **Retry taxonomy**: `DrivePermanentError` vs `DriveTransientError`
-  (see §7). Gemini calls in `conversion/multi_page` also retry via
-  tenacity.
+- **Per-key filelock**: `convert_note` and `delete_output` share a
+  `filelock.FileLock` (`workflows/locks.py`) keyed on a SHA-256 of
+  `logical_key` (lockfiles under `/tmp/sn2md-worker-locks/`) so
+  conversions and deletes of the same note serialize cleanly across
+  workers.
+- **Retry taxonomy**: `DrivePermanentError` vs `DriveTransientError`,
+  multiply-inheriting from the source-neutral `SourcePermanentError` /
+  `SourceTransientError` (see §7). Gemini calls in
+  `conversion/multi_page` also retry via tenacity.
 - **View dataclasses**: state repos return frozen `<Entity>View`
   dataclasses instead of ORM objects — callers can hold them past
   session close without any `DetachedInstanceError` risk.

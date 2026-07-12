@@ -14,7 +14,10 @@ Runs continuously as a Docker container on my Unraid server.
    `POST /webhooks/drive`.
 3. Worker verifies the channel + token, then enqueues a `poll_changes`
    DBOS workflow which walks the `changes.list` cursor and enqueues
-   `convert_note` for each affected `.note` file.
+   `convert_note` for each affected `.note` file. A scheduled fallback
+   poll (default every 5 minutes) runs the same path even when no push
+   arrives, so the pipeline no longer depends solely on Google
+   delivering notifications.
 4. `convert_note` downloads the file, extracts each page's PNG, calls
    Gemini 2.5 Pro only for pages whose hash has changed since the last
    conversion (via the `page_conversions` cache table), and writes one
@@ -53,10 +56,14 @@ Runs continuously as a Docker container on my Unraid server.
 - **Catch-up on restart**: `backfill` workflow enqueues on startup — it
   walks the source folder tree and enqueues `convert_note` for anything
   missing from `conversion_records` or whose md5 doesn't match.
-- **Fallback poller** (deferred): a scheduled `poll_changes` cron would
-  provide a safety net when a webhook is missed. Currently not built —
-  the startup backfill and manual webhook delivery both cover the
-  observed failure modes, and we can add it if we see actual misses.
+- **Fallback poller** (shipped): a scheduled `poll_changes` cron
+  (default every 5 minutes, configurable) walks the change feed even
+  when no push notification arrives, so a webhook Google drops (or
+  silently stops delivering to a still-valid channel) self-heals within
+  minutes instead of waiting for a restart. Renewing a watch channel
+  also triggers a catch-up poll, covering changes that land while the
+  channel is being swapped. Merged to main 2026-07-12; ships in the
+  first release after v0.2.0.
 - **Public URL**: existing reverse proxy on Unraid handles TLS + routing to
   the worker container. Webhook path suggested: `/webhooks/drive`.
 - **Watch channel renewal**: Confirmed max TTL 7 days (604800s) for
@@ -70,7 +77,7 @@ Runs continuously as a Docker container on my Unraid server.
   random hex), echoed as `X-Goog-Channel-Token` on every notification.
   Worker verifies token + `X-Goog-Channel-Id` against the active channel
   record.
-- **Debounce** (deferred): the tech brief includes a per-file
+- **Debounce** (deferred by design): the tech brief includes a per-file
   size/md5 stability poll before conversion. Not built — Drive appears
   to only publish notifications for completed uploads, so we've enqueued
   `convert_note` directly. Table `debounce_state` exists and the runtime
@@ -82,12 +89,22 @@ Runs continuously as a Docker container on my Unraid server.
   we only call Gemini for pages whose rendered PNG has changed. Editing
   the last page of a 20-page notebook costs one Gemini call, not 20.
   Identity for "same note" is the Drive path + filename, not the
-  `fileId` (see technical-brief §4a).
+  `fileId` (see technical-brief §4a). The cache matches pages by
+  content hash (rendered-PNG md5), not position, so inserting a page
+  mid-note re-converts only the new page rather than cascading the
+  pages after it through Gemini (shipped 2026-07-05).
 - **Deletion handling**: if a `.note` is deleted from Drive, delete the
   corresponding Markdown + assets from the vault (mirror source). Delete
   workflow first confirms no live file with the same logical key still
   exists — protects against the delete-then-recreate race during device
   edits.
+- **Ingestion seam** (merged to main 2026-07-12): the conversion
+  workflows read notes through a source-neutral `NoteSource` interface;
+  Google Drive is its first and only implementation. This keeps
+  dropping the Google dependency later (for example a local-folder or
+  direct-from-device source) a configuration choice rather than a
+  rewrite. Optionality only for now: alternatives are exploratory and
+  no decision to move off Drive has been made.
 
 ### Backfill & idempotency
 
@@ -127,8 +144,9 @@ Runs continuously as a Docker container on my Unraid server.
   restart; step-level retries configurable (specifics in technical brief).
 - **Concurrency**: `DBOS.register_queue("convert", worker_concurrency=N)` —
   configurable, default 2.
-- **Scheduling**: `DBOS.create_schedule` used for weekly Drive watch-channel
-  renewal.
+- **Scheduling**: `DBOS.create_schedule` used for the daily Drive
+  watch-channel renewal check and the fallback change poll (default
+  every 5 minutes).
 
 ### Output layout
 
@@ -154,7 +172,12 @@ Runs continuously as a Docker container on my Unraid server.
   Two multi-arch (`linux/amd64` + `linux/arm64`) images published to
   GHCR from the same repo: `sn2md-worker` (the worker) and
   `sn2md-worker/obsidian-sync` (a companion running Obsidian's headless
-  sync CLI against the shared vault dir). Unraid operations are
+  sync CLI against the shared vault dir). As of v0.2.0 (2026-07-11) the
+  companion is hands-off: it logs in and pairs the vault automatically
+  from `OBSIDIAN_*` env vars, runs as a fixed non-root user (`99:100`,
+  Unraid's `nobody:users`) rather than the linuxserver PUID/PGID
+  scheme, and clears a stale sync lock on startup instead of needing
+  manual intervention. Unraid operations are
   documented in `docs/unraid-runbook.md`.
 - **Mounts**:
   - `/data` — DBOS + application SQLite state, must be writable.
@@ -174,20 +197,25 @@ Runs continuously as a Docker container on my Unraid server.
   200 iff an active Drive watch channel exists and hasn't expired, or
   the worker is in dev mode with no webhook URL configured).
 - **Status endpoint**: `GET /status` returns JSON with recent
-  conversions, recent failures, active watch channel + expiry, Drive
-  changes cursor, in-flight `queue_depth` per DBOS queue, and the
-  latest `backfill` workflow's outcome.
+  conversions, recent failures, recent pending conversions, active
+  watch channel + expiry, Drive changes cursor, in-flight `queue_depth`
+  per DBOS queue, the latest `backfill` workflow's outcome, and
+  per-step startup outcomes under `startup`.
 - **Logs**: structured JSON to stdout via `structlog`. Every workflow
   emits `_started` / `_succeeded` / `_failed` / `_skipped (reason=…)`
   events. Failures include a stringified exception plus the full
-  traceback under `exception`.
+  traceback under `exception`. Successful health-probe requests
+  (`/healthz`, `/readyz`) are filtered out of the access log so
+  container healthchecks don't flood it; failed probes and real
+  traffic still appear.
 - **Failure notifications**: none beyond logs (revisit if it becomes
   painful).
 
 ### Testing
 
-- **Unit tests** (`tests/unit/`): 206 tests, in-memory SQLite. BDD
-  scenario classes for behavior (workflows, webhook, repos); plain
+- **Unit tests** (`tests/unit/`): 261 tests as of 2026-07-12,
+  in-memory SQLite. BDD scenario classes for behavior (workflows,
+  webhook, repos); plain
   functions for pure logic (path helpers, model alias mapping,
   TypeDecorator).
 - **Fake externals via MagicMock and `patch`**: `DriveClient`,
@@ -222,4 +250,5 @@ Runs continuously as a Docker container on my Unraid server.
    Worker creates a fresh channel on TTL headroom or URL change.
 5. **Live conversion** — verified via ngrok deploy: Supernote edit →
    Drive push → `poll_changes` → `convert_note` → `page-NN.md` in the
-   vault. Multi-arch image publish pending first push to GitHub.
+   vault. Multi-arch images have been publishing to GHCR since
+   v0.1.0 (2026-07-05); v0.2.0 followed on 2026-07-11.
