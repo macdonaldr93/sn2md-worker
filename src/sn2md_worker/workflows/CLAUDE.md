@@ -7,13 +7,15 @@ conventions.
 
 ```python
 @DBOS.workflow()
-def convert_note(file_id: str, source_path: str) -> None:
-    convert_note_impl(
-        file_id=file_id,
-        source_path=source_path,
-        source=get_drive_client(),
-        settings=get_settings(),
-    )
+def convert_note(file_id: str, source_path: str, correlation_id: str | None = None) -> None:
+    with structlog.contextvars.bound_contextvars(dbos_workflow_id=DBOS.workflow_id):
+        convert_note_impl(
+            file_id=file_id,
+            source_path=source_path,
+            source=get_drive_client(),
+            settings=get_settings(),
+            correlation_id=correlation_id,
+        )
 
 
 def convert_note_impl(
@@ -22,15 +24,25 @@ def convert_note_impl(
     source_path: str,
     source: NoteSource,
     settings: Settings,
+    correlation_id: str | None = None,
 ) -> None:
     ...
 ```
 
 - Public wrapper: positional args (matches `DBOS.enqueue_workflow`
   ergonomics) and no dependency on singletons at the call site.
+  `correlation_id` is always the TRAILING defaulted arg: adding it that
+  way keeps DBOS recovery of in-flight pre-upgrade workflows compatible
+  (their persisted args simply omit it). The wrapper also binds
+  `dbos_workflow_id` (via the `DBOS.workflow_id` classproperty) so every
+  log line from the run links back to DBOS's own workflow row.
 - `_impl`: kwargs, takes the injected dependency and `settings` (and
   `now` where a workflow uses wall-clock). Tests call the impl directly
   with fakes.
+- Scheduler-driven wrappers (`scheduled_poll_changes`,
+  `scheduled_backfill`, `renew_watch_channel`) keep the exact
+  `(scheduled_time, context)` signature `DBOS.create_schedule` invokes
+  them with: no `correlation_id` arg; they mint one per tick instead.
 - The seam'd impls (`convert_note`, `backfill`, `delete_output`) take
   `source: NoteSource` (the ingestion seam from `sources/`); tests mock
   the protocol with `MagicMock(spec=NoteSource)`. The
@@ -49,10 +61,12 @@ Every impl body opens a `bound_contextvars` scope so subsequent log
 calls inherit the workflow context automatically:
 
 ```python
-def convert_note_impl(*, file_id, source_path, source, settings):
+def convert_note_impl(*, file_id, source_path, source, settings, correlation_id=None):
+    correlation_id = correlation_id or new_correlation_id()
     key = logical_key(source_path)
     with structlog.contextvars.bound_contextvars(
-        workflow="convert_note", file_id=file_id, logical_key=key
+        workflow="convert_note", file_id=file_id, logical_key=key,
+        correlation_id=correlation_id,
     ):
         _log.info("convert_note_started")
         try:
@@ -72,18 +86,33 @@ _log.info("convert_note_skipped", reason="up_to_date")
 Levels: INFO on happy path, WARNING for graceful degradation
 (configuration missing, safety guard tripped), ERROR for failures.
 
-HTTP requests get an outer `request_id` from
-`app.CorrelationIdMiddleware`; workflows run on DBOS worker threads
-that don't share those contextvars, so cross-boundary tracing uses
-`file_id` / `logical_key`.
+Two distinct ids, on purpose:
+
+- `request_id` is HTTP-scoped: `app.RequestIdMiddleware` binds it (plus
+  `method`, `path`) for the lifetime of one inbound request and echoes
+  it back in the `X-Request-Id` response header.
+- `correlation_id` identifies one end-to-end logical operation and
+  crosses the enqueue boundary as an explicit trailing workflow arg
+  (DBOS persists workflow args durably; contextvars never reach the
+  worker threads). It is minted once at each root trigger (webhook
+  receipt, `scheduled_poll_changes` cron tick, `scheduled_backfill`
+  cron tick, renewal run,
+  `ensure_active_channel` at boot, `enqueue_startup_backfill`) via
+  `correlation.new_correlation_id()`, then inherited by every child
+  enqueue. Impls are self-healing: called with `None` (pre-upgrade
+  replays, direct invocations) they mint a fresh id before binding it.
+  The webhook logs `correlation_id` as an event field so the
+  HTTP-scoped `request_id` and the async chain link from one line.
 
 ## 3. Enqueueing from another workflow
 
-Use the queue constants from `workflows/__init__.py`:
+Use the queue constants from `workflows/__init__.py`, and always pass
+your own `correlation_id` through as the trailing arg so the child run
+stays traceable to the root trigger:
 
 ```python
-DBOS.enqueue_workflow(CONVERT_QUEUE_NAME, convert_note, file_id, source_path)
-DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, "webhook")
+DBOS.enqueue_workflow(CONVERT_QUEUE_NAME, convert_note, file_id, source_path, correlation_id)
+DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, "webhook", correlation_id)
 ```
 
 Queues (registered by `workflows.register_queues()` after
@@ -109,6 +138,12 @@ pre-checked idempotently via `DBOS.get_schedule`):
   notifications Google silently dropped (or stopped delivering) while
   the process stayed up — the one case the boot-time recovery paths
   can't cover because there was never a restart.
+- `backfill-sweep` - cron from `settings.drive.backfill_sweep_cron`
+  (default `0 5 * * *`, daily 05:00 UTC). Runs `scheduled_backfill`,
+  which enqueues `backfill` onto `poll_queue`. Re-drives conversions
+  that failed permanently (record stale or non-SUCCESS), the one case
+  neither the fallback poll (change-log only) nor the boot-time paths
+  cover while the process stays up.
 
 ## Startup helpers exposed by this package
 
@@ -153,6 +188,14 @@ Called from `__main__.py` in order after `DBOS.launch()`:
   health, so a push Google silently dropped (or stopped delivering to a
   still-valid channel) while the process stayed up self-heals within one
   cron interval instead of stalling until the next restart.
+- **Failed conversions**: a conversion that fails permanently (for
+  example Gemini 429 retries exhausted) leaves the DBOS workflow in
+  ERROR and the conversion record stale or non-SUCCESS; nothing on the
+  change-log path re-drives it because the note itself didn't change.
+  The daily `backfill-sweep` cron enqueues a `backfill` (cheap and
+  idempotent: single SELECT, walk the tree, enqueue only stale notes),
+  so such notes self-heal within a day instead of waiting for a
+  restart or the next edit.
 
 ## Deferred workflows
 

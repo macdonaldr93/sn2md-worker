@@ -424,8 +424,97 @@ class TestWhenTheFallbackScheduleFires:
 
         # THEN — a single poll is enqueued (not run inline) so it
         # serializes behind any webhook-triggered poll on the cursor
-        enqueue.assert_called_once_with(POLL_QUEUE_NAME, poll_changes, POLL_TRIGGER_FALLBACK)
+        enqueue.assert_called_once()
+        args, _ = enqueue.call_args
+        assert args[:3] == (POLL_QUEUE_NAME, poll_changes, POLL_TRIGGER_FALLBACK)
         assert POLL_TRIGGER_FALLBACK == "fallback"
+
+        # AND - each cron tick is a root trigger, so a fresh non-empty
+        # correlation id rides along as the trailing workflow arg
+        assert isinstance(args[3], str)
+        assert args[3]
+
+
+class TestWhenPollRunsWithAnInheritedCorrelationId:
+    def test_convert_and_delete_enqueues_carry_the_same_id(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN - one note update and one removal in the changes feed
+        drive.get_start_page_token.return_value = "1"
+        drive.changes_list.return_value = ChangesPage(
+            changes=(
+                _change("file-1", name="a.note"),
+                _removal("file-gone"),
+            ),
+            new_start_page_token="10",
+        )
+        drive.get_metadata.side_effect = lambda fid, fields=None: NoteMetadata(
+            id=fid, name=f"{fid}.note", parents=(SOURCE_FOLDER_ID,)
+        )
+
+        # WHEN - the impl runs with an explicit correlation id
+        with patch("sn2md_worker.workflows.poll_changes.DBOS.enqueue_workflow") as enqueue:
+            poll_changes_impl(
+                trigger_source="test",
+                drive=drive,
+                settings=settings,
+                correlation_id="corr-abc",
+            )
+
+        # THEN - every child enqueue carries the inherited id as its
+        # trailing workflow arg
+        assert enqueue.call_count == 2
+        by_target = {call.args[1]: call.args for call in enqueue.call_args_list}
+        assert by_target[convert_note][-1] == "corr-abc"
+        assert by_target[delete_output][-1] == "corr-abc"
+
+    def test_cursor_reset_backfill_carries_the_same_id(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN - Drive rejects the cursor, forcing the reset-and-backfill path
+        drive.get_start_page_token.return_value = "FRESH-99"
+        drive.changes_list.side_effect = DrivePermanentError("HTTP 404: pageToken not found")
+
+        # WHEN
+        with patch("sn2md_worker.workflows.poll_changes.DBOS.enqueue_workflow") as enqueue:
+            poll_changes_impl(
+                trigger_source="test",
+                drive=drive,
+                settings=settings,
+                correlation_id="corr-abc",
+            )
+
+        # THEN - the recovery backfill inherits the poll's correlation id
+        enqueue.assert_called_once()
+        args, _ = enqueue.call_args
+        assert args[0] == POLL_QUEUE_NAME
+        assert args[1] is backfill
+        assert args[2] == "corr-abc"
+
+
+class TestWhenPollRunsWithoutACorrelationId:
+    def test_children_still_get_a_non_empty_minted_id(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN - a pre-upgrade replay: no correlation id was persisted
+        drive.get_start_page_token.return_value = "1"
+        drive.changes_list.return_value = ChangesPage(
+            changes=(_change("file-1", name="a.note"),),
+            new_start_page_token="10",
+        )
+        drive.get_metadata.side_effect = lambda fid, fields=None: NoteMetadata(
+            id=fid, name=f"{fid}.note", parents=(SOURCE_FOLDER_ID,)
+        )
+
+        # WHEN - correlation_id is omitted entirely
+        with patch("sn2md_worker.workflows.poll_changes.DBOS.enqueue_workflow") as enqueue:
+            poll_changes_impl(trigger_source="test", drive=drive, settings=settings)
+
+        # THEN - the impl self-heals by minting one and passing it down
+        enqueue.assert_called_once()
+        minted = enqueue.call_args.args[-1]
+        assert isinstance(minted, str)
+        assert minted
 
 
 class TestCursorSeeding:

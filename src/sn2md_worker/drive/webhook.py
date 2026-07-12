@@ -7,6 +7,7 @@ from dbos._error import DBOSQueueDeduplicatedError  # noqa: PLC2701
 from fastapi import APIRouter, Request, Response, status
 
 from sn2md_worker.clock import now_utc
+from sn2md_worker.correlation import new_correlation_id
 from sn2md_worker.db import sql_session
 from sn2md_worker.logging import get_logger
 from sn2md_worker.state.models import DriveWatchChannel
@@ -51,19 +52,30 @@ def drive_webhook(request: Request) -> Response:
     message_number = headers.get("message_number", "")
     dedup_id = f"{channel_id}:{message_number}" if message_number else None
 
+    # Root trigger: mint the correlation id here and log it alongside the
+    # HTTP-scoped request_id (already in contextvars) so the async chain
+    # is linkable to this notification from one log line.
+    correlation_id = new_correlation_id()
+
     try:
         if dedup_id is not None:
             with SetEnqueueOptions(deduplication_id=dedup_id):
-                DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, POLL_TRIGGER_WEBHOOK)
+                DBOS.enqueue_workflow(
+                    POLL_QUEUE_NAME, poll_changes, POLL_TRIGGER_WEBHOOK, correlation_id
+                )
         else:
-            DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, POLL_TRIGGER_WEBHOOK)
+            DBOS.enqueue_workflow(
+                POLL_QUEUE_NAME, poll_changes, POLL_TRIGGER_WEBHOOK, correlation_id
+            )
     except DBOSQueueDeduplicatedError:
         # Google's push-retry hit us with an already-active dedup id — the
         # first delivery is doing (or has queued) the poll_changes. Ack.
-        _log.info("drive_webhook_deduped", dedup_id=dedup_id, **headers)
+        _log.info(
+            "drive_webhook_deduped", dedup_id=dedup_id, correlation_id=correlation_id, **headers
+        )
         return Response(status_code=status.HTTP_200_OK)
 
-    _log.info("drive_webhook_notification", **headers)
+    _log.info("drive_webhook_notification", correlation_id=correlation_id, **headers)
     return Response(status_code=status.HTTP_200_OK)
 
 

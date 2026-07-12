@@ -9,6 +9,7 @@ poll_debounce_stable_seconds = 30
 poll_debounce_interval_seconds = 10
 poll_debounce_max_iterations = 60
 fallback_poll_cron = "*/5 * * * *"
+backfill_sweep_cron = "0 5 * * *"
 
 [vault]
 # Filesystem path inside the container where sn2md output lands.

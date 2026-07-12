@@ -120,6 +120,36 @@ class TestWhenLiveFileStillExistsAtSameLocation:
         assert args[2] == "file-new"
         assert args[3] == LOGICAL_KEY  # source_path == logical_key in this fixture
 
+        # AND - a non-empty correlation id (self-heal minted here, since
+        # none was passed in) rides along as the trailing workflow arg
+        assert isinstance(args[4], str)
+        assert args[4]
+
+
+class TestWhenRepointRunsWithAnInheritedCorrelationId:
+    def test_repoint_enqueue_carries_the_same_id(
+        self, engine: Engine, settings: Settings, source: MagicMock, vault_root: Path
+    ) -> None:
+        # GIVEN - the Supernote replace pattern (stale delete, live replacement)
+        _seed_record(engine, file_id="file-old", parent_folder_id="parent-1")
+        _seed_output_dir(vault_root)
+        source.find_live_note.return_value = NoteMetadata(
+            id="file-new", name="2026-07.note", parents=("parent-1",)
+        )
+
+        # WHEN - the impl runs with an explicit correlation id
+        with patch("sn2md_worker.workflows.delete_output.DBOS.enqueue_workflow") as enqueue:
+            delete_output_impl(
+                file_id="file-old",
+                source=source,
+                settings=settings,
+                correlation_id="corr-abc",
+            )
+
+        # THEN - the repoint convert_note enqueue inherits the id
+        enqueue.assert_called_once()
+        assert enqueue.call_args.args[-1] == "corr-abc"
+
 
 class TestWhenNoLiveFileExistsAtSameLocation:
     def test_removes_vault_output_and_record(

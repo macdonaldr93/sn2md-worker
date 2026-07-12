@@ -27,6 +27,18 @@ from sn2md_worker.workflows.renew_watch import (
 NOW = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
 
 
+def _assert_renewal_poll_enqueued(enqueue: MagicMock) -> str:
+    """Assert exactly one 'renewal' catch-up poll was enqueued with a
+    non-empty trailing correlation id; return that id."""
+    enqueue.assert_called_once()
+    args = enqueue.call_args.args
+    assert args[:3] == (POLL_QUEUE_NAME, poll_changes, "renewal")
+    correlation_id = args[3]
+    assert isinstance(correlation_id, str)
+    assert correlation_id
+    return correlation_id
+
+
 @pytest.fixture
 def engine(tmp_path: Path) -> Iterator[Engine]:
     eng = create_engine(f"sqlite:///{tmp_path / 'renew.sqlite'}", future=True)
@@ -154,7 +166,7 @@ class TestWhenActiveChannelIsExpiringSoon:
         assert active is not None
         assert active.channel_id == "new-channel"
         # AND — a catch-up "renewal" poll covers the replacement seam
-        enqueue.assert_called_once_with(POLL_QUEUE_NAME, poll_changes, "renewal")
+        _assert_renewal_poll_enqueued(enqueue)
 
 
 class TestWhenActiveChannelIsFresh:
@@ -225,7 +237,7 @@ class TestWhenActiveChannelHasStaleWebhookUrl:
         assert active.channel_id == "new-channel"
         assert active.webhook_url == settings.webhook.url
         # AND — a catch-up "renewal" poll covers the replacement seam
-        enqueue.assert_called_once_with(POLL_QUEUE_NAME, poll_changes, "renewal")
+        _assert_renewal_poll_enqueued(enqueue)
 
     def test_survives_a_drive_stop_failure_and_still_renews(
         self, engine: Engine, settings: Settings, drive: MagicMock
@@ -258,7 +270,7 @@ class TestWhenActiveChannelHasStaleWebhookUrl:
         assert active is not None
         assert active.channel_id == "new-channel"
         # AND — a catch-up "renewal" poll still fires despite the stop failure
-        enqueue.assert_called_once_with(POLL_QUEUE_NAME, poll_changes, "renewal")
+        _assert_renewal_poll_enqueued(enqueue)
 
 
 class TestWhenReplacingAnExpiringChannel:
@@ -285,8 +297,9 @@ class TestWhenReplacingAnExpiringChannel:
         with patch("sn2md_worker.workflows.renew_watch.DBOS.enqueue_workflow") as enqueue:
             renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
 
-        # THEN — a single "renewal" catch-up poll covers the replacement seam
-        enqueue.assert_called_once_with(POLL_QUEUE_NAME, poll_changes, "renewal")
+        # THEN - a single "renewal" catch-up poll covers the replacement
+        # seam, carrying a non-empty correlation id minted for this run
+        _assert_renewal_poll_enqueued(enqueue)
 
 
 class TestWhenReplacingAChannelWithAStaleUrl:
@@ -313,8 +326,9 @@ class TestWhenReplacingAChannelWithAStaleUrl:
         with patch("sn2md_worker.workflows.renew_watch.DBOS.enqueue_workflow") as enqueue:
             renew_watch_channel_impl(trigger_source="test", drive=drive, settings=settings, now=NOW)
 
-        # THEN — a single "renewal" catch-up poll covers the replacement seam
-        enqueue.assert_called_once_with(POLL_QUEUE_NAME, poll_changes, "renewal")
+        # THEN - a single "renewal" catch-up poll covers the replacement
+        # seam, carrying a non-empty correlation id minted for this run
+        _assert_renewal_poll_enqueued(enqueue)
 
 
 class TestWhenWebhookUrlIsNotConfigured:
@@ -444,6 +458,13 @@ class TestEnsureActiveChannelWhenPreviousChannelHasExpired:
         assert all(call.args[0] == "poll_queue" for call in enqueue.call_args_list)
         triggers = {call.args[2] for call in enqueue.call_args_list}
         assert triggers == {"recovery", "renewal"}
+
+        # AND - both polls carry the SAME non-empty correlation id:
+        # ensure_active_channel mints one per boot and hands it to the
+        # renewal impl, so the whole recovery traces as one operation.
+        correlation_ids = {call.args[3] for call in enqueue.call_args_list}
+        assert len(correlation_ids) == 1
+        assert correlation_ids.pop()
 
         # AND — the normal renewal flow still ran (new channel is active)
         with Session(engine) as session:

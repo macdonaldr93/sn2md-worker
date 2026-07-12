@@ -110,6 +110,12 @@ class TestWhenGoogleSendsAuthenticatedChangeNotification:
         assert args[1] is poll_changes
         assert args[2] == "webhook"
 
+        # AND - a freshly minted correlation id rides along as the
+        # trailing workflow arg so the async chain links back to this
+        # notification.
+        assert isinstance(args[3], str)
+        assert args[3]
+
 
 class TestWhenChannelIdIsUnknown:
     def test_still_returns_200_but_does_not_enqueue(self, engine: Engine) -> None:

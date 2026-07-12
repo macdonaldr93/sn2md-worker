@@ -1,6 +1,6 @@
 # CLAUDE.md — tests/unit
 
-261 unit tests, in-memory SQLite. Directory structure mirrors
+285 unit tests, in-memory SQLite. Directory structure mirrors
 `src/sn2md_worker/`.
 
 ## When to use BDD vs plain functions

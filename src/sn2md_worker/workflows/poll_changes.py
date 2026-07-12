@@ -7,6 +7,7 @@ import structlog
 from dbos import DBOS
 
 from sn2md_worker.config import Settings, get_settings
+from sn2md_worker.correlation import new_correlation_id
 from sn2md_worker.db import sql_session
 from sn2md_worker.drive.client import DriveClient, DrivePermanentError, get_drive_client
 from sn2md_worker.drive.models import ChangeEvent
@@ -40,12 +41,14 @@ _log = get_logger("sn2md_worker.workflows.poll_changes")
 
 
 @DBOS.workflow()
-def poll_changes(trigger_source: str) -> None:
-    poll_changes_impl(
-        trigger_source=trigger_source,
-        drive=get_drive_client(),
-        settings=get_settings(),
-    )
+def poll_changes(trigger_source: str, correlation_id: str | None = None) -> None:
+    with structlog.contextvars.bound_contextvars(dbos_workflow_id=DBOS.workflow_id):
+        poll_changes_impl(
+            trigger_source=trigger_source,
+            drive=get_drive_client(),
+            settings=get_settings(),
+            correlation_id=correlation_id,
+        )
 
 
 @DBOS.workflow()
@@ -53,8 +56,14 @@ def scheduled_poll_changes(scheduled_time: datetime, context: str) -> None:
     """DBOS-scheduled fallback. Enqueue a poll onto poll_queue (rather
     than running inline) so it serializes behind any webhook-triggered
     poll instead of racing it on the shared cursor. The safety net for
-    push notifications Google dropped while the process stayed up."""
-    DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, POLL_TRIGGER_FALLBACK)
+    push notifications Google dropped while the process stayed up.
+
+    Signature stays exactly `(scheduled_time, context)`: that is what
+    `DBOS.create_schedule` invokes scheduled workflows with. Root
+    trigger: a fresh correlation id is minted per cron tick."""
+    DBOS.enqueue_workflow(
+        POLL_QUEUE_NAME, poll_changes, POLL_TRIGGER_FALLBACK, new_correlation_id()
+    )
 
 
 def poll_changes_impl(
@@ -62,6 +71,7 @@ def poll_changes_impl(
     trigger_source: str,
     drive: DriveClient,
     settings: Settings,
+    correlation_id: str | None = None,
 ) -> None:
     """Walk changes since the last saved cursor and enqueue conversions.
 
@@ -73,7 +83,12 @@ def poll_changes_impl(
     file that surfaces as a permanent 404 shouldn't stall every later
     change on the same page.
     """
-    with structlog.contextvars.bound_contextvars(workflow="poll_changes", trigger=trigger_source):
+    # Self-healing mint: replays of pre-upgrade enqueues (and direct
+    # invocations) arrive with None and still get a usable id.
+    correlation_id = correlation_id or new_correlation_id()
+    with structlog.contextvars.bound_contextvars(
+        workflow="poll_changes", trigger=trigger_source, correlation_id=correlation_id
+    ):
         _log.info("poll_changes_started")
         try:
             page_token = _load_or_init_cursor(drive)
@@ -110,7 +125,7 @@ def poll_changes_impl(
                     )
                     new_token = drive.get_start_page_token()
                     _save_cursor(new_token)
-                    DBOS.enqueue_workflow(POLL_QUEUE_NAME, backfill)
+                    DBOS.enqueue_workflow(POLL_QUEUE_NAME, backfill, correlation_id)
                     _log.info(
                         "poll_changes_recovery_enqueued",
                         new_cursor=new_token,
@@ -119,7 +134,9 @@ def poll_changes_impl(
 
                 for change in page.changes:
                     try:
-                        dispatched = _dispatch(change, cached_get_metadata, settings)
+                        dispatched = _dispatch(
+                            change, cached_get_metadata, settings, correlation_id
+                        )
                     except DrivePermanentError as exc:
                         # 4xx from Drive: the file is gone / rejected / forbidden.
                         # No retry can fix that, so log it and keep processing
@@ -175,10 +192,11 @@ def _dispatch(
     change: ChangeEvent,
     get_metadata: Callable[[str], NoteMetadata],
     settings: Settings,
+    correlation_id: str,
 ) -> bool:
     """Enqueue convert_note (or delete_output) for eligible changes."""
     if change.removed:
-        DBOS.enqueue_workflow(DELETE_QUEUE_NAME, delete_output, change.file_id)
+        DBOS.enqueue_workflow(DELETE_QUEUE_NAME, delete_output, change.file_id, correlation_id)
         _log.info(
             "poll_changes_enqueued",
             file_id=change.file_id,
@@ -190,7 +208,7 @@ def _dispatch(
     if change.file is None:
         return False
     if change.file.trashed:
-        DBOS.enqueue_workflow(DELETE_QUEUE_NAME, delete_output, change.file_id)
+        DBOS.enqueue_workflow(DELETE_QUEUE_NAME, delete_output, change.file_id, correlation_id)
         _log.info(
             "poll_changes_enqueued",
             file_id=change.file_id,
@@ -209,7 +227,9 @@ def _dispatch(
     if source_path is None:
         return False
 
-    DBOS.enqueue_workflow(CONVERT_QUEUE_NAME, convert_note, change.file_id, source_path)
+    DBOS.enqueue_workflow(
+        CONVERT_QUEUE_NAME, convert_note, change.file_id, source_path, correlation_id
+    )
     _log.info(
         "poll_changes_enqueued",
         file_id=change.file_id,

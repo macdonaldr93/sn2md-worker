@@ -20,6 +20,7 @@ class DriveConfig(BaseModel, frozen=True):
     poll_debounce_interval_seconds: int = Field(default=10, ge=1)
     poll_debounce_max_iterations: int = Field(default=60, ge=1)
     fallback_poll_cron: str = "*/5 * * * *"
+    backfill_sweep_cron: str = "0 5 * * *"
 
 
 class VaultConfig(BaseModel, frozen=True):

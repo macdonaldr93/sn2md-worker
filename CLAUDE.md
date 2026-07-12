@@ -103,6 +103,8 @@ src/sn2md_worker/
 ├── __main__.py         entrypoint + startup sequencing
 ├── app.py              FastAPI factory
 ├── config.py           Settings (pydantic-settings) + singleton
+├── correlation.py      new_correlation_id(): mints the correlation_id
+│                       that workflows carry across enqueue boundaries
 ├── db.py               engine + datasource singletons, sql_session(),
 │                       global SQLite connect listener (WAL + 30s busy_timeout)
 ├── logging.py          structlog + stdlib JSON setup
@@ -123,7 +125,7 @@ src/sn2md_worker/
 
 ```sh
 uv sync                      # install deps + local package
-uv run pytest                # 261 tests
+uv run pytest                # 285 tests
 uv run ruff check src tests scripts
 uv run ruff format src tests scripts
 uv run mypy src
@@ -183,7 +185,11 @@ Some are user preferences saved to memory; some are project-specific:
   (resets cursor via `get_start_page_token` + enqueues a fresh
   `backfill`), and `ensure_active_channel`'s recovery poll on boot.
   Renewal also enqueues a catch-up `poll_changes("renewal")` when it
-  swaps an existing channel, closing the seam mid-swap.
+  swaps an existing channel, closing the seam mid-swap. The daily
+  `backfill-sweep` schedule (`settings.drive.backfill_sweep_cron`)
+  now also re-drives failed conversions, the case neither the
+  fallback poll nor the boot-time paths cover while the process
+  stays up.
 - ~~Hash-first page cache~~ - now implemented (2026-07-05, commit
   82f8a67). `conversion/multi_page._preload_cached_bodies` indexes
   prior page bodies by md5, so a page inserted mid-note re-converts

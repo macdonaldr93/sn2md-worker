@@ -9,6 +9,7 @@ from dbos import DBOS
 
 from sn2md_worker.clock import now_utc
 from sn2md_worker.config import Settings, get_settings
+from sn2md_worker.correlation import new_correlation_id
 from sn2md_worker.db import sql_session
 from sn2md_worker.drive.client import DriveClient, DriveClientError, get_drive_client
 from sn2md_worker.logging import get_logger
@@ -37,12 +38,16 @@ _log = get_logger("sn2md_worker.workflows.renew_watch")
 
 @DBOS.workflow()
 def renew_watch_channel(scheduled_time: datetime, context: str) -> None:
-    renew_watch_channel_impl(
-        trigger_source=f"scheduled:{context}",
-        drive=get_drive_client(),
-        settings=get_settings(),
-        now=now_utc(),
-    )
+    # Signature stays exactly `(scheduled_time, context)`: that is what
+    # `DBOS.create_schedule` invokes scheduled workflows with. The impl
+    # mints its own correlation id per run (root trigger: cron tick).
+    with structlog.contextvars.bound_contextvars(dbos_workflow_id=DBOS.workflow_id):
+        renew_watch_channel_impl(
+            trigger_source=f"scheduled:{context}",
+            drive=get_drive_client(),
+            settings=get_settings(),
+            now=now_utc(),
+        )
 
 
 def renew_watch_channel_impl(
@@ -51,13 +56,17 @@ def renew_watch_channel_impl(
     drive: DriveClient,
     settings: Settings,
     now: datetime,
+    correlation_id: str | None = None,
 ) -> None:
     """Idempotent renewal check: create a new channel if none active,
     the current one expires within `RENEWAL_HEADROOM`, or it is
     registered to a URL that no longer matches settings.
     """
+    # Root trigger when None (the daily cron run); inherited when
+    # `ensure_active_channel` passes its boot-scoped id through.
+    correlation_id = correlation_id or new_correlation_id()
     with structlog.contextvars.bound_contextvars(
-        workflow="renew_watch_channel", trigger=trigger_source
+        workflow="renew_watch_channel", trigger=trigger_source, correlation_id=correlation_id
     ):
         _log.info("renew_watch_started")
         try:
@@ -100,7 +109,7 @@ def renew_watch_channel_impl(
                 # this path can enqueue a second poll then - harmless, since
                 # poll_queue runs at concurrency 1 and the follow-up poll is
                 # a cheap no-op once the cursor has advanced.
-                DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, "renewal")
+                DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, "renewal", correlation_id)
             _log.info("renew_watch_succeeded")
         except Exception as exc:
             _log.error("renew_watch_failed", error=str(exc), exc_info=True)
@@ -117,28 +126,35 @@ def ensure_active_channel(drive: DriveClient | None, settings: Settings) -> None
     `drive_change_cursor` we last persisted, so it walks from the last
     confirmed point rather than the current head.
     """
-    if drive is None:
-        _log.warning("renew_watch_skipped", trigger="startup", reason="no_drive_client")
-        return
+    # Root trigger: one id for the whole boot recovery, shared by the
+    # recovery poll and the renewal (plus its catch-up poll) so the two
+    # enqueues this path can produce trace back to the same boot.
+    correlation_id = new_correlation_id()
+    with structlog.contextvars.bound_contextvars(correlation_id=correlation_id):
+        if drive is None:
+            _log.warning("renew_watch_skipped", trigger="startup", reason="no_drive_client")
+            return
 
-    now = now_utc()
-    with sql_session() as session:
-        active = watch_channels.get_active(session)
+        now = now_utc()
+        with sql_session() as session:
+            active = watch_channels.get_active(session)
 
-    if active is not None and active.expires_at <= now:
-        _log.warning(
-            "renew_watch_previous_channel_expired",
-            channel_id=active.channel_id,
-            expired_at=active.expires_at.isoformat(),
+        if active is not None and active.expires_at <= now:
+            _log.warning(
+                "renew_watch_previous_channel_expired",
+                trigger="startup",
+                channel_id=active.channel_id,
+                expired_at=active.expires_at.isoformat(),
+            )
+            DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, "recovery", correlation_id)
+
+        renew_watch_channel_impl(
+            trigger_source="startup",
+            drive=drive,
+            settings=settings,
+            now=now,
+            correlation_id=correlation_id,
         )
-        DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, "recovery")
-
-    renew_watch_channel_impl(
-        trigger_source="startup",
-        drive=drive,
-        settings=settings,
-        now=now,
-    )
 
 
 def _try_stop_channel(*, drive: DriveClient, active: WatchChannelView) -> None:

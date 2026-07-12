@@ -13,7 +13,7 @@ from sn2md_worker import __version__
 from sn2md_worker.drive.webhook import router as drive_webhook_router
 from sn2md_worker.observability import router as observability_router
 
-__all__ = ["REQUEST_ID_HEADER", "CorrelationIdMiddleware", "create_app"]
+__all__ = ["REQUEST_ID_HEADER", "RequestIdMiddleware", "create_app"]
 
 REQUEST_ID_HEADER = "X-Request-Id"
 
@@ -25,19 +25,22 @@ def create_app() -> FastAPI:
         docs_url=None,
         redoc_url=None,
     )
-    app.add_middleware(CorrelationIdMiddleware)
+    app.add_middleware(RequestIdMiddleware)
     app.include_router(observability_router)
     app.include_router(drive_webhook_router)
     return app
 
 
-class CorrelationIdMiddleware(BaseHTTPMiddleware):
-    """Bind a per-request correlation id into structlog's contextvars.
+class RequestIdMiddleware(BaseHTTPMiddleware):
+    """Bind a per-request id into structlog's contextvars.
 
-    Every log line emitted during the request lifecycle picks up
-    `request_id`, `method`, and `path` — greppable from Docker logs
-    without touching the individual log call sites. The id is echoed
-    back in the response header so upstream callers can correlate.
+    `request_id` is scoped to one inbound HTTP request: every log line
+    emitted during the request lifecycle picks up `request_id`, `method`,
+    and `path`, greppable from Docker logs without touching the
+    individual log call sites. The id is echoed back in the response
+    header so upstream callers can correlate. Work that outlives the
+    request (DBOS enqueues) carries a separate `correlation_id` instead
+    (see `sn2md_worker.correlation`).
     """
 
     async def dispatch(

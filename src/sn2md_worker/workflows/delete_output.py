@@ -7,6 +7,7 @@ import structlog
 from dbos import DBOS
 
 from sn2md_worker.config import Settings, get_settings
+from sn2md_worker.correlation import new_correlation_id
 from sn2md_worker.db import sql_session
 from sn2md_worker.drive.client import get_drive_client
 from sn2md_worker.logging import get_logger
@@ -22,12 +23,14 @@ _log = get_logger("sn2md_worker.workflows.delete_output")
 
 
 @DBOS.workflow()
-def delete_output(file_id: str) -> None:
-    delete_output_impl(
-        file_id=file_id,
-        source=get_drive_client(),
-        settings=get_settings(),
-    )
+def delete_output(file_id: str, correlation_id: str | None = None) -> None:
+    with structlog.contextvars.bound_contextvars(dbos_workflow_id=DBOS.workflow_id):
+        delete_output_impl(
+            file_id=file_id,
+            source=get_drive_client(),
+            settings=get_settings(),
+            correlation_id=correlation_id,
+        )
 
 
 def delete_output_impl(
@@ -35,6 +38,7 @@ def delete_output_impl(
     file_id: str,
     source: NoteSource,
     settings: Settings,
+    correlation_id: str | None = None,
 ) -> None:
     """Mirror a Drive removal into the vault, with Supernote replace-safety.
 
@@ -43,7 +47,12 @@ def delete_output_impl(
     new file and leave the vault output untouched. Otherwise the per-note
     directory is removed and the record dropped.
     """
-    with structlog.contextvars.bound_contextvars(workflow="delete_output", file_id=file_id):
+    # Self-healing mint: replays of pre-upgrade enqueues (and direct
+    # invocations) arrive with None and still get a usable id.
+    correlation_id = correlation_id or new_correlation_id()
+    with structlog.contextvars.bound_contextvars(
+        workflow="delete_output", file_id=file_id, correlation_id=correlation_id
+    ):
         _log.info("delete_output_started")
         try:
             # First read is outside the lock only to resolve logical_key;
@@ -68,7 +77,11 @@ def delete_output_impl(
                         # Guards against a delete-side push without a
                         # matching create-side push.
                         DBOS.enqueue_workflow(
-                            CONVERT_QUEUE_NAME, convert_note, live.id, record.source_path
+                            CONVERT_QUEUE_NAME,
+                            convert_note,
+                            live.id,
+                            record.source_path,
+                            correlation_id,
                         )
                         _log.info(
                             "delete_output_skipped",

@@ -12,9 +12,10 @@ from collections.abc import Callable
 from dbos import DBOS
 
 from sn2md_worker.config import Settings, get_settings
+from sn2md_worker.correlation import new_correlation_id
 from sn2md_worker.drive.client import DriveClient
 from sn2md_worker.logging import get_logger
-from sn2md_worker.workflows.backfill import backfill, backfill_impl
+from sn2md_worker.workflows.backfill import backfill, backfill_impl, scheduled_backfill
 from sn2md_worker.workflows.convert_note import convert_note, convert_note_impl
 from sn2md_worker.workflows.delete_output import delete_output, delete_output_impl
 from sn2md_worker.workflows.poll_changes import (
@@ -39,8 +40,10 @@ _log = get_logger("sn2md_worker.workflows")
 RENEW_SCHEDULE_NAME = "renew-watch-channel"
 RENEW_SCHEDULE_CRON = "0 6 * * *"  # daily at 06:00 UTC
 FALLBACK_POLL_SCHEDULE_NAME = "fallback-poll-changes"
+BACKFILL_SWEEP_SCHEDULE_NAME = "backfill-sweep"
 
 __all__ = [
+    "BACKFILL_SWEEP_SCHEDULE_NAME",
     "CONVERT_QUEUE_NAME",
     "DELETE_QUEUE_NAME",
     "FALLBACK_POLL_SCHEDULE_NAME",
@@ -61,6 +64,7 @@ __all__ = [
     "register_schedules",
     "renew_watch_channel",
     "renew_watch_channel_impl",
+    "scheduled_backfill",
     "scheduled_poll_changes",
     "seed_cursor",
     "seed_cursor_if_ready",
@@ -101,6 +105,11 @@ def register_schedules() -> None:
         scheduled_poll_changes,
         settings.drive.fallback_poll_cron,
     )
+    _register_schedule(
+        BACKFILL_SWEEP_SCHEDULE_NAME,
+        scheduled_backfill,
+        settings.drive.backfill_sweep_cron,
+    )
 
 
 def _register_schedule(schedule_name: str, workflow_fn: Callable[..., None], schedule: str) -> None:
@@ -132,5 +141,10 @@ def enqueue_startup_backfill() -> None:
 
     Idempotent — backfill only enqueues convert_note for notes that are
     missing or whose md5 has changed, so a spurious run is a no-op.
+    Root trigger: mints the correlation id the backfill (and every
+    convert_note it fans out to) will carry, and logs it so boot logs
+    link to the run.
     """
-    DBOS.enqueue_workflow(POLL_QUEUE_NAME, backfill)
+    correlation_id = new_correlation_id()
+    DBOS.enqueue_workflow(POLL_QUEUE_NAME, backfill, correlation_id)
+    _log.info("startup_backfill_enqueued", correlation_id=correlation_id)

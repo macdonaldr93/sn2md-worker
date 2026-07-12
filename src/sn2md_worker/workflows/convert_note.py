@@ -21,6 +21,7 @@ from sn2md_worker.conversion.paths import (
     note_output_dir,
     output_rel_path,
 )
+from sn2md_worker.correlation import new_correlation_id
 from sn2md_worker.db import sql_session
 from sn2md_worker.drive.client import get_drive_client
 from sn2md_worker.logging import get_logger
@@ -37,13 +38,15 @@ _log = get_logger("sn2md_worker.workflows.convert_note")
 
 
 @DBOS.workflow()
-def convert_note(file_id: str, source_path: str) -> None:
-    convert_note_impl(
-        file_id=file_id,
-        source_path=source_path,
-        source=get_drive_client(),
-        settings=get_settings(),
-    )
+def convert_note(file_id: str, source_path: str, correlation_id: str | None = None) -> None:
+    with structlog.contextvars.bound_contextvars(dbos_workflow_id=DBOS.workflow_id):
+        convert_note_impl(
+            file_id=file_id,
+            source_path=source_path,
+            source=get_drive_client(),
+            settings=get_settings(),
+            correlation_id=correlation_id,
+        )
 
 
 def convert_note_impl(
@@ -52,8 +55,12 @@ def convert_note_impl(
     source_path: str,
     source: NoteSource,
     settings: Settings,
+    correlation_id: str | None = None,
 ) -> None:
     """Download → per-page convert → upsert. Split so tests bypass DBOS."""
+    # Self-healing mint: replays of pre-upgrade enqueues (and direct
+    # invocations) arrive with None and still get a usable id.
+    correlation_id = correlation_id or new_correlation_id()
     try:
         key = logical_key(source_path)
     except UnsafePathError as exc:
@@ -63,11 +70,12 @@ def convert_note_impl(
             reason="unsafe_path",
             source_path=source_path,
             file_id=file_id,
+            correlation_id=correlation_id,
             error=str(exc),
         )
         return
     with structlog.contextvars.bound_contextvars(
-        workflow="convert_note", file_id=file_id, logical_key=key
+        workflow="convert_note", file_id=file_id, logical_key=key, correlation_id=correlation_id
     ):
         _log.info("convert_note_started")
         # Lock before the up-to-date check so two workers can't both

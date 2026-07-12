@@ -58,7 +58,7 @@ class TestHealthz:
         assert response.json() == {"status": "ok"}
 
 
-class TestCorrelationIdMiddleware:
+class TestRequestIdMiddleware:
     def test_generates_and_returns_a_request_id_when_none_is_supplied(self, engine: Engine) -> None:
         # GIVEN
         set_settings(_settings())

@@ -16,9 +16,9 @@ from sn2md_worker.sources.protocol import NoteSource
 from sn2md_worker.state import conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
-from sn2md_worker.workflows.backfill import backfill_impl
+from sn2md_worker.workflows.backfill import backfill, backfill_impl, scheduled_backfill
 from sn2md_worker.workflows.convert_note import convert_note
-from sn2md_worker.workflows.poll_changes import CONVERT_QUEUE_NAME
+from sn2md_worker.workflows.poll_changes import CONVERT_QUEUE_NAME, POLL_QUEUE_NAME
 
 NOW = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
 SOURCE_FOLDER_ID = "SRC"
@@ -199,6 +199,46 @@ class TestConversionRecordsAreBulkLoadedOnce:
         assert spy.call_count == 1
 
 
+class TestWhenBackfillRunsWithAnInheritedCorrelationId:
+    def test_convert_enqueues_carry_the_same_id(
+        self, engine: Engine, settings: Settings, source: MagicMock
+    ) -> None:
+        # GIVEN - two unconverted notes
+        source.list_all_notes.return_value = iter(
+            [
+                _listed("f1", "Notebooks/2026-07.note", name="2026-07.note"),
+                _listed("f2", "Notebooks/2026-08.note", name="2026-08.note"),
+            ]
+        )
+
+        # WHEN - the impl runs with an explicit correlation id
+        with patch("sn2md_worker.workflows.backfill.DBOS.enqueue_workflow") as enqueue:
+            backfill_impl(source=source, settings=settings, correlation_id="corr-abc")
+
+        # THEN - every convert_note enqueue inherits the id as its
+        # trailing workflow arg
+        assert enqueue.call_count == 2
+        assert all(call.args[-1] == "corr-abc" for call in enqueue.call_args_list)
+
+
+class TestWhenBackfillRunsWithoutACorrelationId:
+    def test_convert_enqueues_still_get_a_non_empty_minted_id(
+        self, engine: Engine, settings: Settings, source: MagicMock
+    ) -> None:
+        # GIVEN - a pre-upgrade replay: no correlation id was persisted
+        source.list_all_notes.return_value = iter([_listed("f1", "Notebooks/2026-07.note")])
+
+        # WHEN - correlation_id is omitted entirely
+        with patch("sn2md_worker.workflows.backfill.DBOS.enqueue_workflow") as enqueue:
+            backfill_impl(source=source, settings=settings)
+
+        # THEN - the impl self-heals by minting one and passing it down
+        enqueue.assert_called_once()
+        minted = enqueue.call_args.args[-1]
+        assert isinstance(minted, str)
+        assert minted
+
+
 class TestWhenSourceFolderIsNotConfigured:
     def test_skips_gracefully(self, engine: Engine, source: MagicMock) -> None:
         # GIVEN — settings with an empty source_folder_id
@@ -211,3 +251,47 @@ class TestWhenSourceFolderIsNotConfigured:
         # THEN — no Drive call, no enqueue
         source.list_all_notes.assert_not_called()
         enqueue.assert_not_called()
+
+
+class TestWhenTheBackfillSweepScheduleFires:
+    def test_enqueues_a_backfill_onto_the_poll_queue(self) -> None:
+        # GIVEN - the DBOS-scheduled sweep fires. We call `__wrapped__`
+        # (the undecorated body) because the `@DBOS.workflow()` wrapper
+        # guards against invocation before DBOS is launched, which never
+        # happens under unit tests.
+        with patch("sn2md_worker.workflows.backfill.DBOS.enqueue_workflow") as enqueue:
+            # WHEN
+            scheduled_backfill.__wrapped__(
+                scheduled_time=datetime(2026, 7, 12, 5, 0, tzinfo=UTC),
+                context="cron",
+            )
+
+        # THEN - a single backfill is enqueued (not run inline) so it
+        # serializes on poll_queue behind any in-flight poll or backfill
+        enqueue.assert_called_once()
+        args, _ = enqueue.call_args
+        assert args[:2] == (POLL_QUEUE_NAME, backfill)
+
+        # AND - each cron tick is a root trigger, so a fresh non-empty
+        # correlation id rides along as the trailing workflow arg
+        assert isinstance(args[2], str)
+        assert args[2]
+
+    def test_two_ticks_mint_different_correlation_ids(self) -> None:
+        # GIVEN - two consecutive cron ticks
+        with patch("sn2md_worker.workflows.backfill.DBOS.enqueue_workflow") as enqueue:
+            # WHEN
+            scheduled_backfill.__wrapped__(
+                scheduled_time=datetime(2026, 7, 12, 5, 0, tzinfo=UTC),
+                context="cron",
+            )
+            scheduled_backfill.__wrapped__(
+                scheduled_time=datetime(2026, 7, 13, 5, 0, tzinfo=UTC),
+                context="cron",
+            )
+
+        # THEN - each tick is its own root trigger carrying its own id
+        assert enqueue.call_count == 2
+        ids = [call.args[2] for call in enqueue.call_args_list]
+        assert all(ids)
+        assert ids[0] != ids[1]
