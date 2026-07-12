@@ -35,8 +35,11 @@ a Docker container on Unraid.
 
 4. **Workflow wrapper vs impl pattern.** Every `@DBOS.workflow()` in
    `src/sn2md_worker/workflows/` is a thin wrapper that delegates to a
-   `<name>_impl(...)` function taking injected dependencies (`drive`,
-   `settings`, ...). Tests exercise the impl directly. See
+   `<name>_impl(...)` function taking injected dependencies. The seam'd
+   impls (convert_note, backfill, delete_output) take
+   `source: NoteSource` plus `settings`; poll_changes and renew_watch
+   take `drive: DriveClient` because the change-feed/watch machinery is
+   Drive infrastructure. Tests exercise the impl directly. See
    [`workflows/CLAUDE.md`](src/sn2md_worker/workflows/CLAUDE.md).
 
 5. **Startup ordering matters and is fragile.** `__main__.py` sequences:
@@ -77,9 +80,14 @@ a Docker container on Unraid.
      the same note across DBOS workers (and would across containers).
    - **Retry taxonomy**: `drive/client.py` distinguishes
      `DrivePermanentError` (4xx-except-429) from `DriveTransientError`
-     (5xx / 429 / network). `poll_changes` catches permanent to
-     log-skip; transient propagates so DBOS retries the workflow.
-     Gemini retries via tenacity in `conversion/multi_page.py`.
+     (5xx / 429 / network); both subclass the source-neutral
+     `SourcePermanentError` / `SourceTransientError` bases from
+     `sources/`. The seam'd workflows (convert_note, backfill,
+     delete_output) catch the neutral bases; poll_changes and
+     renew_watch stay on the Drive-specific types (that machinery is
+     Drive infrastructure). Permanent means log-skip; transient
+     propagates so DBOS retries the workflow. Gemini retries via
+     tenacity in `conversion/multi_page.py`.
    - **View dataclasses**: state repo getters return frozen
      `<Entity>View` dataclasses, not ORM instances. Callers can hold
      them past session close without `DetachedInstanceError`.
@@ -99,8 +107,11 @@ src/sn2md_worker/
 │                       global SQLite connect listener (WAL + 30s busy_timeout)
 ├── logging.py          structlog + stdlib JSON setup
 ├── observability.py    /healthz /readyz /status
-├── drive/              DriveClient (retry-wrapped via tenacity), models,
-│                       path resolver, webhook route
+├── sources/            NoteSource protocol + source-neutral models
+│                       (NoteMetadata, ListedNote) and errors; the
+│                       ingestion seam workflows depend on
+├── drive/              DriveClient (implements NoteSource; retry-wrapped
+│                       via tenacity), models, path resolver, webhook route
 ├── conversion/         paths + per-page runner (multi_page.py)
 ├── state/              SQLAlchemy models + per-table repos returning
 │                       frozen `*View` dataclasses (detached-instance safe)
@@ -112,7 +123,7 @@ src/sn2md_worker/
 
 ```sh
 uv sync                      # install deps + local package
-uv run pytest                # 206 tests
+uv run pytest                # 247 tests
 uv run ruff check src tests scripts
 uv run ruff format src tests scripts
 uv run mypy src

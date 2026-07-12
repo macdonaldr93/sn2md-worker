@@ -22,8 +22,9 @@ from sn2md_worker.conversion.paths import (
     output_rel_path,
 )
 from sn2md_worker.db import sql_session
-from sn2md_worker.drive.client import DriveClient, get_drive_client
+from sn2md_worker.drive.client import get_drive_client
 from sn2md_worker.logging import get_logger
+from sn2md_worker.sources.protocol import NoteSource
 from sn2md_worker.state import conversions, page_conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import ConversionStatus
@@ -40,7 +41,7 @@ def convert_note(file_id: str, source_path: str) -> None:
     convert_note_impl(
         file_id=file_id,
         source_path=source_path,
-        drive=get_drive_client(),
+        source=get_drive_client(),
         settings=get_settings(),
     )
 
@@ -49,7 +50,7 @@ def convert_note_impl(
     *,
     file_id: str,
     source_path: str,
-    drive: DriveClient,
+    source: NoteSource,
     settings: Settings,
 ) -> None:
     """Download → per-page convert → upsert. Split so tests bypass DBOS."""
@@ -73,7 +74,7 @@ def convert_note_impl(
         # observe "stale" and both re-run.
         with lock_for(key):
             try:
-                meta = drive.get_metadata(file_id)
+                meta = source.get_metadata(file_id)
                 if meta.trashed:
                     _log.info("convert_note_skipped", reason="trashed")
                     return
@@ -100,7 +101,7 @@ def convert_note_impl(
                 )
 
                 with tempfile.TemporaryDirectory(prefix="sn2md-worker-") as tmp_root:
-                    note_path = drive.download(file_id, Path(tmp_root), meta.name)
+                    note_path = source.download(file_id, Path(tmp_root), meta.name)
 
                     _log.info(
                         "convert_note_running_multi_page",

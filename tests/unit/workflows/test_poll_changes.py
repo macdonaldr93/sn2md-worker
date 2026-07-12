@@ -16,7 +16,8 @@ from sn2md_worker.drive.client import (
     DrivePermanentError,
     DriveTransientError,
 )
-from sn2md_worker.drive.models import ChangeEvent, ChangesPage, FileMetadata
+from sn2md_worker.drive.models import ChangeEvent, ChangesPage
+from sn2md_worker.sources.models import NoteMetadata
 from sn2md_worker.state import cursor
 from sn2md_worker.state.models import Base
 from sn2md_worker.workflows.backfill import backfill
@@ -61,7 +62,7 @@ def _change(
     return ChangeEvent(
         fileId=file_id,
         removed=False,
-        file=FileMetadata(id=file_id, name=name, parents=parents),
+        file=NoteMetadata(id=file_id, name=name, parents=parents),
     )
 
 
@@ -82,7 +83,7 @@ class TestWhenChangesContainNoteUpdates:
             ),
             new_start_page_token="42",
         )
-        drive.get_metadata.side_effect = lambda fid, fields=None: FileMetadata(
+        drive.get_metadata.side_effect = lambda fid, fields=None: NoteMetadata(
             id=fid, name=f"{fid}.note", parents=(SOURCE_FOLDER_ID,)
         )
 
@@ -117,7 +118,7 @@ class TestWhenChangesContainNonNoteFiles:
             ),
             new_start_page_token="10",
         )
-        drive.get_metadata.side_effect = lambda fid, fields=None: FileMetadata(
+        drive.get_metadata.side_effect = lambda fid, fields=None: NoteMetadata(
             id=fid, name="notes.note", parents=(SOURCE_FOLDER_ID,)
         )
 
@@ -162,7 +163,7 @@ class TestWhenChangesContainRemovalsOrTrashedFiles:
                 ChangeEvent(
                     fileId="file-1",
                     removed=False,
-                    file=FileMetadata(
+                    file=NoteMetadata(
                         id="file-1",
                         name="note.note",
                         parents=(SOURCE_FOLDER_ID,),
@@ -195,9 +196,9 @@ class TestWhenChangeIsOutsideSourceFolder:
             new_start_page_token="10",
         )
         drive.get_metadata.side_effect = lambda fid, fields=None: (
-            FileMetadata(id="stray", name="stray.note", parents=("OTHER",))
+            NoteMetadata(id="stray", name="stray.note", parents=("OTHER",))
             if fid == "stray"
-            else FileMetadata(id="OTHER", name="OtherFolder", parents=())
+            else NoteMetadata(id="OTHER", name="OtherFolder", parents=())
         )
 
         # WHEN
@@ -223,12 +224,12 @@ class TestWhenDispatchRaisesMidPage:
             new_start_page_token="42",
         )
 
-        def flaky_metadata(fid: str, fields: str | None = None) -> FileMetadata:  # noqa: ARG001
+        def flaky_metadata(fid: str, fields: str | None = None) -> NoteMetadata:  # noqa: ARG001
             if fid == "file-boom":
                 # Simulate what a since-deleted file's 404 looks like after
                 # `_call` wrapping: it surfaces as DrivePermanentError.
                 raise DrivePermanentError("HTTP 404 on file-boom")
-            return FileMetadata(id=fid, name=f"{fid}.note", parents=(SOURCE_FOLDER_ID,))
+            return NoteMetadata(id=fid, name=f"{fid}.note", parents=(SOURCE_FOLDER_ID,))
 
         drive.get_metadata.side_effect = flaky_metadata
 
@@ -263,10 +264,10 @@ class TestWhenDispatchRaisesATransientErrorMidPage:
             new_start_page_token="AFTER",
         )
 
-        def flaky_metadata(fid: str, fields: str | None = None) -> FileMetadata:  # noqa: ARG001
+        def flaky_metadata(fid: str, fields: str | None = None) -> NoteMetadata:  # noqa: ARG001
             if fid == "file-boom":
                 raise DriveTransientError("HTTP 503 after 3 retries")
-            return FileMetadata(id=fid, name=f"{fid}.note", parents=(SOURCE_FOLDER_ID,))
+            return NoteMetadata(id=fid, name=f"{fid}.note", parents=(SOURCE_FOLDER_ID,))
 
         drive.get_metadata.side_effect = flaky_metadata
 
@@ -301,7 +302,7 @@ class TestCursorAdvancesPerPageAcrossMultiplePages:
             new_start_page_token="TOKEN-END",
         )
         drive.changes_list.side_effect = [page_a, page_b]
-        drive.get_metadata.side_effect = lambda fid, fields=None: FileMetadata(
+        drive.get_metadata.side_effect = lambda fid, fields=None: NoteMetadata(
             id=fid, name=f"{fid}.note", parents=(SOURCE_FOLDER_ID,)
         )
 
@@ -354,13 +355,13 @@ class TestMetadataCacheAcrossChanges:
             new_start_page_token="10",
         )
         graph = {
-            "file-a": FileMetadata(id="file-a", name="a.note", parents=("SUB",)),
-            "file-b": FileMetadata(id="file-b", name="b.note", parents=("SUB",)),
-            "SUB": FileMetadata(id="SUB", name="Journal", parents=(SOURCE_FOLDER_ID,)),
+            "file-a": NoteMetadata(id="file-a", name="a.note", parents=("SUB",)),
+            "file-b": NoteMetadata(id="file-b", name="b.note", parents=("SUB",)),
+            "SUB": NoteMetadata(id="SUB", name="Journal", parents=(SOURCE_FOLDER_ID,)),
         }
         seen: list[str] = []
 
-        def spy_metadata(fid: str, fields: str | None = None) -> FileMetadata:  # noqa: ARG001
+        def spy_metadata(fid: str, fields: str | None = None) -> NoteMetadata:  # noqa: ARG001
             seen.append(fid)
             return graph[fid]
 
