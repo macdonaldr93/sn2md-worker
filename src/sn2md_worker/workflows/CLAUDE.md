@@ -11,7 +11,7 @@ def convert_note(file_id: str, source_path: str) -> None:
     convert_note_impl(
         file_id=file_id,
         source_path=source_path,
-        drive=get_drive_client(),
+        source=get_drive_client(),
         settings=get_settings(),
     )
 
@@ -20,7 +20,7 @@ def convert_note_impl(
     *,
     file_id: str,
     source_path: str,
-    drive: DriveClient,
+    source: NoteSource,
     settings: Settings,
 ) -> None:
     ...
@@ -28,10 +28,20 @@ def convert_note_impl(
 
 - Public wrapper: positional args (matches `DBOS.enqueue_workflow`
   ergonomics) and no dependency on singletons at the call site.
-- `_impl`: kwargs, takes `drive` and `settings` (and `now` where a
-  workflow uses wall-clock). Tests call the impl directly with fakes.
+- `_impl`: kwargs, takes the injected dependency and `settings` (and
+  `now` where a workflow uses wall-clock). Tests call the impl directly
+  with fakes.
+- The seam'd impls (`convert_note`, `backfill`, `delete_output`) take
+  `source: NoteSource` (the ingestion seam from `sources/`); tests mock
+  the protocol with `MagicMock(spec=NoteSource)`. The
+  `poll_changes` / `renew_watch_channel` impls still take
+  `drive: DriveClient` on purpose: the change-feed/watch machinery is
+  Drive infrastructure that gets deleted entirely (not reimplemented)
+  if a local source ever replaces Drive.
 - `set_drive_client`, `set_settings`, `set_engine` are wired at startup
-  by `__main__.py`; wrappers reach them via `get_*()`.
+  by `__main__.py`; wrappers reach them via `get_*()`. The wrapper is
+  the composition point: it passes `get_drive_client()` as `source=`
+  for the seam'd workflows.
 
 ## 2. Structured log events + correlation
 
@@ -39,7 +49,7 @@ Every impl body opens a `bound_contextvars` scope so subsequent log
 calls inherit the workflow context automatically:
 
 ```python
-def convert_note_impl(*, file_id, source_path, drive, settings):
+def convert_note_impl(*, file_id, source_path, source, settings):
     key = logical_key(source_path)
     with structlog.contextvars.bound_contextvars(
         workflow="convert_note", file_id=file_id, logical_key=key
