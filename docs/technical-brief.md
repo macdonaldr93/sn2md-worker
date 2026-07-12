@@ -120,17 +120,17 @@ sn2md-worker/
 
 ## 3. External dependencies
 
-| Concern            | Library / API                              | Version target             |
-|--------------------|--------------------------------------------|----------------------------|
-| HTTP server        | `fastapi` + `uvicorn`                      | current stable             |
-| Config             | `pydantic-settings`                        | v2.x                       |
-| Google Drive       | `google-api-python-client`, `google-auth`  | current                    |
-| Durable workflows  | `dbos` (DBOS Transact)                     | current stable             |
-| Note conversion    | `sn2md` (as library)                       | v2.7.0                     |
-| LLM provider       | `llm` + `llm-gemini`                       | llm-gemini ≥0.32           |
-| Structured logging | `structlog` (or stdlib + json formatter)   | latest                     |
-| Testing            | `pytest`, `pytest-asyncio`                 | current                    |
-| Quality            | `ruff`, `mypy`, `pre-commit`               | current                    |
+| Concern            | Library / API                             | Version target   |
+| ------------------ | ----------------------------------------- | ---------------- |
+| HTTP server        | `fastapi` + `uvicorn`                     | current stable   |
+| Config             | `pydantic-settings`                       | v2.x             |
+| Google Drive       | `google-api-python-client`, `google-auth` | current          |
+| Durable workflows  | `dbos` (DBOS Transact)                    | current stable   |
+| Note conversion    | `sn2md` (as library)                      | v2.7.0           |
+| LLM provider       | `llm` + `llm-gemini`                      | llm-gemini ≥0.32 |
+| Structured logging | `structlog` (or stdlib + json formatter)  | latest           |
+| Testing            | `pytest`, `pytest-asyncio`                | current          |
+| Quality            | `ruff`, `mypy`, `pre-commit`              | current          |
 
 Python version pinned to **3.11** (sn2md's floor).
 
@@ -200,19 +200,19 @@ of the code that manages them.
 name), because Supernote sync replaces the file rather than updating in
 place (see §4a).
 
-| column           | type    | notes                                       |
-|------------------|---------|---------------------------------------------|
-| logical_key      | TEXT PK | `<parent_path>/<name>` — stable across device edits |
-| current_file_id  | TEXT    | Latest Drive file ID for this logical file; mutable |
-| parent_folder_id | TEXT    | Nullable; parent folder's Drive id — lets `delete_output` scope its live-file check without re-walking parents |
-| source_name      | TEXT    | Drive file name at last conversion          |
-| source_path      | TEXT    | Full Drive path (folder chain / name)       |
-| source_md5       | TEXT    | md5Checksum from Drive metadata             |
-| output_rel_path  | TEXT    | Path relative to `/vault`                   |
-| last_status      | TEXT    | SUCCESS \| ERROR \| SKIPPED                 |
-| last_converted_at| DATETIME|                                             |
-| attempts         | INTEGER |                                             |
-| last_error       | TEXT    | Nullable, last error message                |
+| column            | type     | notes                                                                                                          |
+| ----------------- | -------- | -------------------------------------------------------------------------------------------------------------- |
+| logical_key       | TEXT PK  | `<parent_path>/<name>` — stable across device edits                                                            |
+| current_file_id   | TEXT     | Latest Drive file ID for this logical file; mutable                                                            |
+| parent_folder_id  | TEXT     | Nullable; parent folder's Drive id — lets `delete_output` scope its live-file check without re-walking parents |
+| source_name       | TEXT     | Drive file name at last conversion                                                                             |
+| source_path       | TEXT     | Full Drive path (folder chain / name)                                                                          |
+| source_md5        | TEXT     | md5Checksum from Drive metadata                                                                                |
+| output_rel_path   | TEXT     | Path relative to `/vault`                                                                                      |
+| last_status       | TEXT     | SUCCESS \| ERROR \| SKIPPED                                                                                    |
+| last_converted_at | DATETIME |                                                                                                                |
+| attempts          | INTEGER  |                                                                                                                |
+| last_error        | TEXT     | Nullable, last error message                                                                                   |
 
 An index on `current_file_id` lets `delete_output` find a record from a
 removed change event.
@@ -222,41 +222,41 @@ removed change event.
 Gemini calls for pages whose PNG hash hasn't changed since last
 convert.
 
-| column          | type    | notes                                            |
-|-----------------|---------|--------------------------------------------------|
-| logical_key     | TEXT    | Composite PK with page_index                     |
-| page_index      | INTEGER | Composite PK; 0-indexed                          |
-| page_md5        | TEXT    | md5 of the rendered PNG                          |
-| output_rel_path | TEXT    | Path relative to the note folder, e.g. `page-01.md` |
-| last_converted_at | DATETIME |                                                |
+| column            | type     | notes                                               |
+| ----------------- | -------- | --------------------------------------------------- |
+| logical_key       | TEXT     | Composite PK with page_index                        |
+| page_index        | INTEGER  | Composite PK; 0-indexed                             |
+| page_md5          | TEXT     | md5 of the rendered PNG                             |
+| output_rel_path   | TEXT     | Path relative to the note folder, e.g. `page-01.md` |
+| last_converted_at | DATETIME |                                                     |
 
 **`drive_watch_channels`** — one row per active/superseded push channel
-| column         | type    | notes                                            |
+| column | type | notes |
 |----------------|---------|--------------------------------------------------|
-| channel_id     | TEXT PK | UUID we generate                                 |
-| resource_id    | TEXT    | From Drive's response                            |
-| token          | TEXT    | 32-byte hex, for authenticity check              |
-| webhook_url    | TEXT    | Nullable; the URL this channel was registered with. `renew_watch_channel_impl` compares against `settings.webhook.url` and forces renewal on mismatch (e.g. ngrok URL changed) |
-| expires_at     | DATETIME| From Drive's response                            |
-| start_page_token | TEXT  | pageToken used at watch time                     |
-| created_at     | DATETIME|                                                  |
-| is_active      | BOOL    | Only one row is_active=True at a time (except during overlap window) |
+| channel_id | TEXT PK | UUID we generate |
+| resource_id | TEXT | From Drive's response |
+| token | TEXT | 32-byte hex, for authenticity check |
+| webhook_url | TEXT | Nullable; the URL this channel was registered with. `renew_watch_channel_impl` compares against `settings.webhook.url` and forces renewal on mismatch (e.g. ngrok URL changed) |
+| expires_at | DATETIME| From Drive's response |
+| start_page_token | TEXT | pageToken used at watch time |
+| created_at | DATETIME| |
+| is_active | BOOL | Only one row is_active=True at a time (except during overlap window) |
 
 **`drive_change_cursor`** — singleton row
-| column         | type    | notes                                            |
+| column | type | notes |
 |----------------|---------|--------------------------------------------------|
-| id             | INTEGER PK | fixed value 1                                 |
-| page_token     | TEXT    | last saved cursor (or startPageToken)            |
-| last_polled_at | DATETIME|                                                  |
+| id | INTEGER PK | fixed value 1 |
+| page_token | TEXT | last saved cursor (or startPageToken) |
+| last_polled_at | DATETIME| |
 
 **`debounce_state`** — one row per file currently being debounced
-| column         | type    | notes                                            |
+| column | type | notes |
 |----------------|---------|--------------------------------------------------|
-| file_id        | TEXT PK |                                                  |
-| last_size      | INTEGER |                                                  |
-| last_md5       | TEXT    |                                                  |
-| stable_since   | DATETIME| Nullable; set when size+md5 unchanged             |
-| updated_at     | DATETIME|                                                  |
+| file_id | TEXT PK | |
+| last_size | INTEGER | |
+| last_md5 | TEXT | |
+| stable_since | DATETIME| Nullable; set when size+md5 unchanged |
+| updated_at | DATETIME| |
 
 ## 5. Workflows
 
@@ -268,6 +268,7 @@ All impls follow the same log discipline: `_started`, `_succeeded` /
 
 Queues (registered after `DBOS.launch()`, names in
 `workflows/queues.py`):
+
 - `convert_queue` — `worker_concurrency=settings.queue.convert_concurrency`
   (default 2). Serves `convert_note` only.
 - `delete_queue` — `worker_concurrency=2`. Serves `delete_output` on its
@@ -278,6 +279,7 @@ Queues (registered after `DBOS.launch()`, names in
 Schedule (registered after `DBOS.launch()`; the register step
 pre-checks via `DBOS.get_schedule` so re-boots on the same DB are a
 no-op):
+
 - `renew-watch-channel` — cron `0 6 * * *` (daily 06:00 UTC).
 
 `convert_note` acquires a `filelock.FileLock` keyed on a SHA-256 of
@@ -311,7 +313,8 @@ holds:
 Otherwise skip with `reason="still_fresh"`. On a decision to renew,
 it's a **two-phase** flow to survive a crash between Drive and the DB
 write:
-1. Insert a *pending* row (channel_id + token + placeholder
+
+1. Insert a _pending_ row (channel_id + token + placeholder
    `resource_id=""`, placeholder `expires_at=now`) BEFORE calling
    Drive. If we crash after Drive succeeds but before we commit the
    real values, the pending row still lets incoming webhook pushes
@@ -387,6 +390,7 @@ def convert_note(file_id: str, source_path: str) -> None:
 ```
 
 `convert_note_impl` flow:
+
 1. Compute `logical_key(source_path)` — raises `UnsafePathError` on
    `..`, NUL, empty segments, or Windows-reserved names, which is
    log-skipped (DBOS won't retry).
@@ -480,11 +484,11 @@ sn2md's per-page primitives ourselves in `conversion/multi_page.py`:
 - `NotebookExtractor.extract_images(file_name, output_path) → list[str]`
   — renders each `.note` page to PNG.
 - `sn2md.ai_utils.image_to_markdown(png_path, context, api_key, model,
-  prompt) → str` — LLM call for a single page.
+prompt) → str` — LLM call for a single page.
 
 **Prompt**: `conversion.multi_page.DEFAULT_PROMPT` — sn2md's
 `TO_MARKDOWN_TEMPLATE` verbatim as the base, with two additional
-bullets appended: (1) ASCII-only characters inside ```mermaid``` code
+bullets appended: (1) ASCII-only characters inside `mermaid` code
 blocks (Unicode arrows, en/em dashes, smart quotes, ellipses, and
 emoji were breaking Mermaid's parser), (2) escape unbalanced
 backticks / angle brackets / pipes in prose. Users can override the
@@ -512,6 +516,7 @@ counters (`gemini_calls`, `cache_hits`) get logged as
 `convert_note_succeeded` fields.
 
 **Notes / gotchas**:
+
 - **We no longer use sn2md's `.sn2md.metadata.yaml` sidecar.** It was
   needed when we called `import_supernote_file_core`; multi-page mode
   doesn't touch it. If it lingers in the vault from a pre-multi-page
@@ -542,6 +547,7 @@ account credential. Scope: `https://www.googleapis.com/auth/drive.readonly`
 backoff with jitter, retries 429/5xx + `ServerNotFoundError`/`SSLError`/
 `TimeoutError`/`ConnectionError`). Terminal errors are classified by
 `_drive_error_from_http`:
+
 - `DrivePermanentError` — 4xx except 429 (retry exhausted for 429
   counts as transient). Callers can log-skip.
 - `DriveTransientError` — 5xx after retries + all transport errors.
@@ -549,6 +555,7 @@ backoff with jitter, retries 429/5xx + `ServerNotFoundError`/`SSLError`/
 - Both subclass `DriveClientError` for backwards-compatible catches.
 
 Public methods on `DriveClient`:
+
 - `get_metadata(file_id, fields=DEFAULT_FILE_FIELDS) → FileMetadata`
 - `get_start_page_token() → str`
 - `download(file_id, dest_dir, name) → Path` — chunked stream via
@@ -567,12 +574,13 @@ Public methods on `DriveClient`:
 
 Path resolution moved out of `DriveClient`: `drive/paths.py` exposes a
 pure `resolve_source_path(file_id, root_folder_id, get_metadata) → str | None`
-that walks *every* parent chain (multi-parent legacy files fall back
+that walks _every_ parent chain (multi-parent legacy files fall back
 past a stray parent that dead-ends), max depth 100. `poll_changes`
 memoizes `drive.get_metadata` for the duration of one run and passes
 the memoized callable in.
 
 Changes-list defaults:
+
 - `restrictToMyDrive=false`
 - `includeRemoved=true`
 - `spaces="drive"`
@@ -591,6 +599,7 @@ Route is `def` (not `async def`) so FastAPI runs it in its threadpool
 — the body does blocking SQLA + DBOS work.
 
 Handler:
+
 1. Return 200 immediately for `X-Goog-Resource-State: sync` (initial
    handshake).
 2. Look up channel by `X-Goog-Channel-Id`; if unknown OR the channel's
@@ -630,6 +639,7 @@ layout. Sections:
 underscore for nesting). Env always wins over TOML.
 
 **Container-canonical paths baked into the Docker image**:
+
 - `SN2MD_WORKER__DATABASE__URL=sqlite:////data/sn2md-worker.sqlite`
 - `SN2MD_WORKER__VAULT__ROOT_PATH=/vault`
 - `SN2MD_WORKER__GOOGLE__APPLICATION_CREDENTIALS=/secrets/service-account.json`
@@ -638,6 +648,7 @@ The image boots without any external config; you can add a
 `config.toml` bind-mount or `.env` file for anything else.
 
 **Secrets** (always env or mounted files, never in TOML):
+
 - `LLM_GEMINI_KEY` — Gemini API key (name matches llm-gemini expectation)
 - Service account JSON at `/secrets/service-account.json` (mount
   read-only)
@@ -646,6 +657,7 @@ The image boots without any external config; you can add a
 ## 10. Deployment
 
 Canonical files:
+
 - [`Dockerfile`](../Dockerfile) — `python:3.11-slim`, uv-managed venv at
   `/app/.venv`, gosu + tzdata installed, non-root `app` user. Root
   ENTRYPOINT drops to `app` after PUID/PGID reshape.
@@ -655,7 +667,7 @@ Canonical files:
   `/vault` (`/app/.venv` is already `app`-owned from the build; skip
   the whole step with `CHOWN_ON_START=false`), then
   `exec gosu app:app "$@"`. Errors are surfaced under `set -euo
-  pipefail` instead of swallowed — a read-only mount or full disk
+pipefail` instead of swallowed — a read-only mount or full disk
   fails the boot loudly.
 - [`docker-compose.yml`](../docker-compose.yml) — reference compose for
   local dev / single-host deployments with env-driven volume paths.
@@ -669,22 +681,22 @@ and semver tags.
 
 ### Volumes (defaults)
 
-| Container path                    | Purpose                              |
-|-----------------------------------|--------------------------------------|
-| `/data`                           | DBOS + app SQLite state (writable)   |
-| `/vault`                          | Obsidian vault directory (writable)  |
-| `/secrets/service-account.json`   | Google service account JSON (ro)     |
-| `/app/config.toml` (optional)     | TOML overrides                       |
+| Container path                  | Purpose                             |
+| ------------------------------- | ----------------------------------- |
+| `/data`                         | DBOS + app SQLite state (writable)  |
+| `/vault`                        | Obsidian vault directory (writable) |
+| `/secrets/service-account.json` | Google service account JSON (ro)    |
+| `/app/config.toml` (optional)   | TOML overrides                      |
 
 ### linuxserver-style env vars
 
-| Env var           | Default | Notes                                                       |
-|-------------------|---------|-------------------------------------------------------------|
-| `PUID`            | `1000`  | Set to your host user's UID for correct file ownership      |
-| `PGID`            | `1000`  |                                                             |
-| `TZ`              | `Etc/UTC` | IANA timezone (e.g. `America/Toronto`)                    |
-| `UMASK`           | `022`   |                                                             |
-| `CHOWN_ON_START`  | `true`  | Set `false` to skip the startup chown pass on huge vaults   |
+| Env var          | Default   | Notes                                                     |
+| ---------------- | --------- | --------------------------------------------------------- |
+| `PUID`           | `1000`    | Set to your host user's UID for correct file ownership    |
+| `PGID`           | `1000`    |                                                           |
+| `TZ`             | `Etc/UTC` | IANA timezone (e.g. `America/Toronto`)                    |
+| `UMASK`          | `022`     |                                                           |
+| `CHOWN_ON_START` | `true`    | Set `false` to skip the startup chown pass on huge vaults |
 
 ### Reverse proxy
 
@@ -734,16 +746,16 @@ LAN-only or behind reverse-proxy auth.
 
 ## 13. Failure modes and recovery
 
-| Scenario                                     | Recovery                                         |
-|----------------------------------------------|--------------------------------------------------|
-| Webhook missed (network glitch)              | Next container restart runs `backfill`, picks up whatever changed. Fallback `poll_changes` cron is deferred (see §5.2). |
-| Container restart mid-conversion             | DBOS resumes workflow from last step             |
-| Watch channel expires without renewal        | Daily `renew_watch_channel` cron creates a fresh channel; cursor preserves continuity between old and new channel |
-| Webhook URL changed (ngrok, DNS)             | `renew_watch_channel_impl` sees `webhook_url != settings.webhook.url` on next fire, calls `drive.stop_channel` on the old channel, creates a new one |
-| Gemini failure / rate limit                  | `convert_note_failed` recorded; DBOS marks workflow ERROR; next `backfill` retries (idempotent via `page_conversions` cache — completed pages skipped) |
-| Malformed `.note`                            | sn2md raises; workflow terminates with ERROR; log + record status; do not retry |
-| Drive quota / auth error                     | Workflow raises; log; next scheduled or manual retry |
-| SQLite locked / corrupted                    | Container fails healthcheck; user restores from backup of `/data` |
+| Scenario                              | Recovery                                                                                                                                               |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Webhook missed (network glitch)       | Next container restart runs `backfill`, picks up whatever changed. Fallback `poll_changes` cron is deferred (see §5.2).                                |
+| Container restart mid-conversion      | DBOS resumes workflow from last step                                                                                                                   |
+| Watch channel expires without renewal | Daily `renew_watch_channel` cron creates a fresh channel; cursor preserves continuity between old and new channel                                      |
+| Webhook URL changed (ngrok, DNS)      | `renew_watch_channel_impl` sees `webhook_url != settings.webhook.url` on next fire, calls `drive.stop_channel` on the old channel, creates a new one   |
+| Gemini failure / rate limit           | `convert_note_failed` recorded; DBOS marks workflow ERROR; next `backfill` retries (idempotent via `page_conversions` cache — completed pages skipped) |
+| Malformed `.note`                     | sn2md raises; workflow terminates with ERROR; log + record status; do not retry                                                                        |
+| Drive quota / auth error              | Workflow raises; log; next scheduled or manual retry                                                                                                   |
+| SQLite locked / corrupted             | Container fails healthcheck; user restores from backup of `/data`                                                                                      |
 
 ## 14. Observability
 
@@ -756,22 +768,46 @@ LAN-only or behind reverse-proxy auth.
   ```json
   {
     "recent_conversions": [
-      {"logical_key": "...", "file_id": "...", "source_md5": "...",
-       "output_rel_path": "...", "last_converted_at": "...", "last_error": null}
+      {
+        "logical_key": "...",
+        "file_id": "...",
+        "source_md5": "...",
+        "output_rel_path": "...",
+        "last_converted_at": "...",
+        "last_error": null
+      }
     ],
-    "recent_failures":    [
-      {"logical_key": "...", "file_id": "...", "source_md5": null,
-       "output_rel_path": "", "last_converted_at": "...", "last_error": "..."}
+    "recent_failures": [
+      {
+        "logical_key": "...",
+        "file_id": "...",
+        "source_md5": null,
+        "output_rel_path": "",
+        "last_converted_at": "...",
+        "last_error": "..."
+      }
     ],
-    "watch_channel":      {"channel_id": "...", "resource_id": "...",
-                           "expires_at": "...", "is_active": true},
-    "change_cursor":      {"page_token": "...", "last_polled_at": "..."},
-    "queue_depth":        {"convert_queue": 0, "poll_queue": 0},
-    "backfill":           {"status": "SUCCESS", "started_at": "...",
-                           "completed_at": "...", "error": null},
-    "startup":            {"drive_client": "ok", "seed_cursor": "ok",
-                           "ensure_channel": "ok", "backfill_enqueue": "ok",
-                           "last_error": null}
+    "watch_channel": {
+      "channel_id": "...",
+      "resource_id": "...",
+      "expires_at": "...",
+      "is_active": true
+    },
+    "change_cursor": { "page_token": "...", "last_polled_at": "..." },
+    "queue_depth": { "convert_queue": 0, "poll_queue": 0 },
+    "backfill": {
+      "status": "SUCCESS",
+      "started_at": "...",
+      "completed_at": "...",
+      "error": null
+    },
+    "startup": {
+      "drive_client": "ok",
+      "seed_cursor": "ok",
+      "ensure_channel": "ok",
+      "backfill_enqueue": "ok",
+      "last_error": null
+    }
   }
   ```
   `queue_depth` and `backfill` are read via raw SQL against DBOS's own
@@ -816,7 +852,7 @@ makes cross-service tracing possible:
   to end.
 - **Workflows** — each `<workflow>_impl` opens
   `structlog.contextvars.bound_contextvars(workflow=..., file_id=...,
-  logical_key=..., trigger=...)`. Every log line inside the scope
+logical_key=..., trigger=...)`. Every log line inside the scope
   auto-picks up those fields so individual call sites don't repeat
   them.
 
@@ -841,6 +877,7 @@ Two shapes:
   TypeDecorator.
 
 External dependencies are patched at the call boundary:
+
 - `DriveClient` — `MagicMock(spec=DriveClient)`, per-method return
   values / side effects.
 - `run_multi_page` — `patch("sn2md_worker.workflows.convert_note.run_multi_page")`

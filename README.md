@@ -130,7 +130,7 @@ old Drive channel, and creates a fresh one. No SQLite nuke required.
 ### Iterating
 
 - **Code changes**: `uv run sn2md-worker` (or `docker compose up
-  --build`) — no watcher yet.
+--build`) — no watcher yet.
 - **Config changes**: env-var overrides (`SN2MD_WORKER__SECTION__KEY`)
   win over `config.toml`, always. Simplest is to edit `.env` and
   restart.
@@ -182,29 +182,29 @@ Two overlapping surfaces:
 
 ### Required env vars
 
-| Env var | Purpose |
-|---|---|
-| `LLM_GEMINI_KEY` | Gemini API key for the `llm-gemini` plugin |
-| `SN2MD_WORKER__DRIVE__SOURCE_FOLDER_ID` | Drive folder ID the Supernote syncs into |
-| `SN2MD_WORKER__WEBHOOK__URL` | Public HTTPS URL for Drive push (skip in dev; backfill covers you) |
+| Env var                                 | Purpose                                                            |
+| --------------------------------------- | ------------------------------------------------------------------ |
+| `LLM_GEMINI_KEY`                        | Gemini API key for the `llm-gemini` plugin                         |
+| `SN2MD_WORKER__DRIVE__SOURCE_FOLDER_ID` | Drive folder ID the Supernote syncs into                           |
+| `SN2MD_WORKER__WEBHOOK__URL`            | Public HTTPS URL for Drive push (skip in dev; backfill covers you) |
 
 ### linuxserver-style user / group
 
-| Env var | Default | Notes |
-|---|---|---|
-| `PUID` | `1000` | Match your host UID for correct file ownership under `/vault` |
-| `PGID` | `1000` |  |
-| `TZ` | `Etc/UTC` | IANA timezone (e.g. `America/Toronto`) |
-| `UMASK` | `022` |  |
-| `CHOWN_ON_START` | `true` | `false` skips the startup chown on huge vaults |
+| Env var          | Default   | Notes                                                         |
+| ---------------- | --------- | ------------------------------------------------------------- |
+| `PUID`           | `1000`    | Match your host UID for correct file ownership under `/vault` |
+| `PGID`           | `1000`    |                                                               |
+| `TZ`             | `Etc/UTC` | IANA timezone (e.g. `America/Toronto`)                        |
+| `UMASK`          | `022`     |                                                               |
+| `CHOWN_ON_START` | `true`    | `false` skips the startup chown on huge vaults                |
 
 ### Volumes
 
-| Container path | Purpose |
-|---|---|
-| `/data` | DBOS + application SQLite state (writable) |
-| `/vault` | Obsidian vault directory (writable) |
-| `/secrets/service-account.json` | Google service account JSON (read-only) |
+| Container path                  | Purpose                                    |
+| ------------------------------- | ------------------------------------------ |
+| `/data`                         | DBOS + application SQLite state (writable) |
+| `/vault`                        | Obsidian vault directory (writable)        |
+| `/secrets/service-account.json` | Google service account JSON (read-only)    |
 
 ## Status
 

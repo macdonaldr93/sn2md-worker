@@ -9,6 +9,7 @@ Ops reference for running sn2md-worker on Unraid. Not read top-to-bottom
   this file is host-side operations only.
 
 Sections:
+
 1. [First install](#1-first-install)
 2. [Enable Obsidian Sync](#2-enable-obsidian-sync)
 3. [Verify health](#3-verify-health)
@@ -57,11 +58,11 @@ worker to loss of your notes.
 
 Layout summary:
 
-| Host path                              | Container path                    | Mode | Owner (PUID:PGID) |
-|----------------------------------------|-----------------------------------|------|-------------------|
-| `${APPDATA}/data`                      | `/data`                           | rw   | writable          |
-| `${APPDATA}/secrets`                   | `/secrets`                        | ro   | readable          |
-| `/mnt/user/obsidian/vault`             | `/vault`                          | rw   | writable          |
+| Host path                  | Container path | Mode | Owner (PUID:PGID) |
+| -------------------------- | -------------- | ---- | ----------------- |
+| `${APPDATA}/data`          | `/data`        | rw   | writable          |
+| `${APPDATA}/secrets`       | `/secrets`     | ro   | readable          |
+| `/mnt/user/obsidian/vault` | `/vault`       | rw   | writable          |
 
 ### 1.3 Install the service account key
 
@@ -90,39 +91,39 @@ installed; you'll need it for rollback.
 
 Unraid's Docker tab → Add Container. Fill in:
 
-| Field | Value |
-|---|---|
-| Name | `sn2md-worker` |
-| Repository | `ghcr.io/macdonaldr93/sn2md-worker:latest` (or the pinned tag) |
-| Network Type | `Bridge` |
-| Console shell | `bash` |
-| Restart Policy | `unless-stopped` |
+| Field          | Value                                                          |
+| -------------- | -------------------------------------------------------------- |
+| Name           | `sn2md-worker`                                                 |
+| Repository     | `ghcr.io/macdonaldr93/sn2md-worker:latest` (or the pinned tag) |
+| Network Type   | `Bridge`                                                       |
+| Console shell  | `bash`                                                         |
+| Restart Policy | `unless-stopped`                                               |
 
 Port mapping:
 
-| Host port | Container port | Type | Notes |
-|---|---|---|---|
-| `8080` | `8080` | TCP | Reachable by the reverse proxy only |
+| Host port | Container port | Type | Notes                               |
+| --------- | -------------- | ---- | ----------------------------------- |
+| `8080`    | `8080`         | TCP  | Reachable by the reverse proxy only |
 
 Volumes:
 
-| Container path | Host path | Access mode |
-|---|---|---|
-| `/data` | `/mnt/user/appdata/sn2md-worker/data` | Read/Write |
-| `/vault` | `/mnt/user/obsidian/vault` | Read/Write |
-| `/secrets` | `/mnt/user/appdata/sn2md-worker/secrets` | Read Only |
+| Container path | Host path                                | Access mode |
+| -------------- | ---------------------------------------- | ----------- |
+| `/data`        | `/mnt/user/appdata/sn2md-worker/data`    | Read/Write  |
+| `/vault`       | `/mnt/user/obsidian/vault`               | Read/Write  |
+| `/secrets`     | `/mnt/user/appdata/sn2md-worker/secrets` | Read Only   |
 
 Environment variables:
 
-| Name | Value | Notes |
-|---|---|---|
-| `PUID` | `99` | Or your host user's UID |
-| `PGID` | `100` | Or your host user's GID |
-| `TZ` | `America/Toronto` | Any IANA zone |
-| `UMASK` | `022` | Optional |
-| `LLM_GEMINI_KEY` | (secret) | Gemini API key |
-| `SN2MD_WORKER__DRIVE__SOURCE_FOLDER_ID` | (Drive folder id) | The Supernote sync folder id |
-| `SN2MD_WORKER__WEBHOOK__URL` | `https://sn2md.yourdomain.tld/webhooks/drive` | Public HTTPS URL to your reverse proxy |
+| Name                                    | Value                                         | Notes                                  |
+| --------------------------------------- | --------------------------------------------- | -------------------------------------- |
+| `PUID`                                  | `99`                                          | Or your host user's UID                |
+| `PGID`                                  | `100`                                         | Or your host user's GID                |
+| `TZ`                                    | `America/Toronto`                             | Any IANA zone                          |
+| `UMASK`                                 | `022`                                         | Optional                               |
+| `LLM_GEMINI_KEY`                        | (secret)                                      | Gemini API key                         |
+| `SN2MD_WORKER__DRIVE__SOURCE_FOLDER_ID` | (Drive folder id)                             | The Supernote sync folder id           |
+| `SN2MD_WORKER__WEBHOOK__URL`            | `https://sn2md.yourdomain.tld/webhooks/drive` | Public HTTPS URL to your reverse proxy |
 
 Leave `SN2MD_WORKER__DATABASE__URL`, `SN2MD_WORKER__VAULT__ROOT_PATH`,
 and `SN2MD_WORKER__GOOGLE__APPLICATION_CREDENTIALS` unset — the image
@@ -131,11 +132,11 @@ bakes container-canonical values. See [`CLAUDE.md`](../CLAUDE.md) item 6.
 Optional tuning knobs (all have sane defaults, only add if you need to
 change them):
 
-| Name | Default | Purpose |
-|---|---|---|
-| `SN2MD_WORKER__OBSERVABILITY__LOG_LEVEL` | `INFO` | Set `DEBUG` to trace individual Drive calls |
-| `SN2MD_WORKER__QUEUE__CONVERT_CONCURRENCY` | `2` | Parallel Gemini conversions |
-| `CHOWN_ON_START` | `true` | Set `false` if `chown -R` on `/vault` is slow at boot |
+| Name                                       | Default | Purpose                                               |
+| ------------------------------------------ | ------- | ----------------------------------------------------- |
+| `SN2MD_WORKER__OBSERVABILITY__LOG_LEVEL`   | `INFO`  | Set `DEBUG` to trace individual Drive calls           |
+| `SN2MD_WORKER__QUEUE__CONVERT_CONCURRENCY` | `2`     | Parallel Gemini conversions                           |
+| `CHOWN_ON_START`                           | `true`  | Set `false` if `chown -R` on `/vault` is slow at boot |
 
 Click **Apply**. First boot pulls the image and starts the container.
 
@@ -199,6 +200,7 @@ for exactly this "server writes files, push them out" case.
 [`obsidian.md/help/sync/headless`](https://obsidian.md/help/sync/headless).
 
 Prerequisites:
+
 - An Obsidian account with a paid Sync subscription
   (`obsidian.md/sync`).
 - A remote vault to sync into. You can either create one from a
@@ -244,33 +246,33 @@ as the same user - the co-ownership constraint in §2.5.
 
 Docker tab → Add Container:
 
-| Field | Value |
-|---|---|
-| Name | `obsidian-sync` |
-| Repository | `ghcr.io/macdonaldr93/sn2md-worker/obsidian-sync:latest` (or a pinned tag) |
-| Network Type | `Bridge` |
-| Restart Policy | `unless-stopped` |
+| Field          | Value                                                                      |
+| -------------- | -------------------------------------------------------------------------- |
+| Name           | `obsidian-sync`                                                            |
+| Repository     | `ghcr.io/macdonaldr93/sn2md-worker/obsidian-sync:latest` (or a pinned tag) |
+| Network Type   | `Bridge`                                                                   |
+| Restart Policy | `unless-stopped`                                                           |
 
 No port mapping - the container makes outbound HTTPS only, to
 Obsidian's Sync servers.
 
 Volumes:
 
-| Container path | Host path | Access mode |
-|---|---|---|
-| `/config` | `/mnt/user/appdata/obsidian-sync` | Read/Write |
-| `/vault` | `/mnt/user/obsidian/vault` (same dir as sn2md-worker) | Read/Write |
+| Container path | Host path                                             | Access mode |
+| -------------- | ----------------------------------------------------- | ----------- |
+| `/config`      | `/mnt/user/appdata/obsidian-sync`                     | Read/Write  |
+| `/vault`       | `/mnt/user/obsidian/vault` (same dir as sn2md-worker) | Read/Write  |
 
 Environment variables:
 
-| Name | Value | Notes |
-|---|---|---|
-| `TZ` | `America/Toronto` | Any IANA zone (optional, for log timestamps only) |
-| `OBSIDIAN_EMAIL` | your Obsidian account email | Mark secret |
-| `OBSIDIAN_PASSWORD` | your Obsidian account password | Mark secret |
-| `OBSIDIAN_VAULT` | remote vault name (or ID) from your Obsidian account | The vault you created from desktop/mobile Obsidian |
-| `OBSIDIAN_ENCRYPTION_PASSWORD` | E2E encryption password for that vault | Mark secret |
-| `OBSIDIAN_MFA` | 6-digit 2FA code | Only needed on very first boot if your account has 2FA on; can be removed after successful login |
+| Name                           | Value                                                | Notes                                                                                            |
+| ------------------------------ | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `TZ`                           | `America/Toronto`                                    | Any IANA zone (optional, for log timestamps only)                                                |
+| `OBSIDIAN_EMAIL`               | your Obsidian account email                          | Mark secret                                                                                      |
+| `OBSIDIAN_PASSWORD`            | your Obsidian account password                       | Mark secret                                                                                      |
+| `OBSIDIAN_VAULT`               | remote vault name (or ID) from your Obsidian account | The vault you created from desktop/mobile Obsidian                                               |
+| `OBSIDIAN_ENCRYPTION_PASSWORD` | E2E encryption password for that vault               | Mark secret                                                                                      |
+| `OBSIDIAN_MFA`                 | 6-digit 2FA code                                     | Only needed on very first boot if your account has 2FA on; can be removed after successful login |
 
 There is no `PUID`/`PGID`/`UMASK` for this container - the runtime uid
 is fixed in the image. If you need a different uid for your host,
@@ -340,11 +342,11 @@ desktop/mobile Obsidian; the Unraid vault dir is headless-only.
 
 Three endpoints, all on port 8080:
 
-| Endpoint | Purpose | Meaning |
-|---|---|---|
-| `GET /healthz` | Liveness | 200 while the process is up |
-| `GET /readyz` | Readiness | 200 if an active `drive_watch_channels` row exists with `expires_at > now`. 503 otherwise. In dev mode (empty `WEBHOOK__URL`) always 200. |
-| `GET /status` | Snapshot | JSON with recent conversions, failures, queue depths, backfill status |
+| Endpoint       | Purpose   | Meaning                                                                                                                                   |
+| -------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /healthz` | Liveness  | 200 while the process is up                                                                                                               |
+| `GET /readyz`  | Readiness | 200 if an active `drive_watch_channels` row exists with `expires_at > now`. 503 otherwise. In dev mode (empty `WEBHOOK__URL`) always 200. |
+| `GET /status`  | Snapshot  | JSON with recent conversions, failures, queue depths, backfill status                                                                     |
 
 Quick check the pipeline is working end-to-end:
 
@@ -541,13 +543,13 @@ curl -s http://<unraid-host>:8080/status | jq '.startup'
 
 Map the failing step to a fix:
 
-| `startup` field | `"failed"` cause | Fix |
-|---|---|---|
-| `drive_client` | `secrets/service-account.json` is malformed or unreadable | Re-download from GCP, replace, `docker restart` |
-| `drive_client` == `"deferred"` and log says `drive_client_skipped_no_credentials` | Volume mount wrong — no file at `/secrets/service-account.json` | Fix the Unraid volume config; confirm with `docker exec sn2md-worker ls /secrets/` |
-| `seed_cursor` | Drive rejected `getStartPageToken` — usually bad credentials (`RefreshError`) or network to `oauth2.googleapis.com` down | Verify key by regenerating (§5). If key is good, check the container's egress network |
-| `ensure_channel` | `changes().watch()` failed — most often the Drive folder isn't shared to the service account, or the webhook URL isn't reachable from Google | Share the folder to the SA email; verify `curl -X POST https://sn2md.<domain>/webhooks/drive` returns 401 from off-network |
-| `backfill_enqueue` | Rare — DBOS enqueue error | Check DBOS logs; typically resolves on restart |
+| `startup` field                                                                   | `"failed"` cause                                                                                                                             | Fix                                                                                                                        |
+| --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| `drive_client`                                                                    | `secrets/service-account.json` is malformed or unreadable                                                                                    | Re-download from GCP, replace, `docker restart`                                                                            |
+| `drive_client` == `"deferred"` and log says `drive_client_skipped_no_credentials` | Volume mount wrong — no file at `/secrets/service-account.json`                                                                              | Fix the Unraid volume config; confirm with `docker exec sn2md-worker ls /secrets/`                                         |
+| `seed_cursor`                                                                     | Drive rejected `getStartPageToken` — usually bad credentials (`RefreshError`) or network to `oauth2.googleapis.com` down                     | Verify key by regenerating (§5). If key is good, check the container's egress network                                      |
+| `ensure_channel`                                                                  | `changes().watch()` failed — most often the Drive folder isn't shared to the service account, or the webhook URL isn't reachable from Google | Share the folder to the SA email; verify `curl -X POST https://sn2md.<domain>/webhooks/drive` returns 401 from off-network |
+| `backfill_enqueue`                                                                | Rare — DBOS enqueue error                                                                                                                    | Check DBOS logs; typically resolves on restart                                                                             |
 
 The daily `renew_watch_channel` cron and the next `docker restart` both
 re-attempt the failing steps. Recovery is automatic once the underlying
@@ -562,10 +564,10 @@ DBOS init failed, an uncaught programming error. In that order:
 docker logs sn2md-worker | jq .
 ```
 
-| Traceback pattern | Cause | Fix |
-|---|---|---|
+| Traceback pattern                                        | Cause                               | Fix                                                               |
+| -------------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------- |
 | `sqlite3.OperationalError: unable to open database file` | `/data` isn't writable by PUID/PGID | Check host-side ownership of `${APPDATA}/data`; `chown` if needed |
-| Any other unhandled exception during boot | Programming bug | Grab logs, open an issue; roll back per §7 |
+| Any other unhandled exception during boot                | Programming bug                     | Grab logs, open an issue; roll back per §7                        |
 
 ### `/readyz` stays 503 forever
 
