@@ -23,8 +23,15 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
-from sn2md_worker.drive.models import ChangesPage, ChannelInfo, FileMetadata
+from sn2md_worker.drive.models import ChangesPage, ChannelInfo
 from sn2md_worker.logging import get_logger
+from sn2md_worker.sources.models import ListedNote, NoteMetadata
+from sn2md_worker.sources.protocol import (
+    NoteSource,
+    SourceError,
+    SourcePermanentError,
+    SourceTransientError,
+)
 
 __all__ = [
     "DEFAULT_CHANGES_FIELDS",
@@ -73,7 +80,7 @@ DRIVE_FOLDER_MIME = "application/vnd.google-apps.folder"
 _NOTE_EXTENSION = ".note"
 
 
-class DriveClientError(RuntimeError):
+class DriveClientError(SourceError):
     """Raised when a Drive API call fails or credentials are misconfigured.
 
     Callers that need to react differently to permanent vs. transient
@@ -84,16 +91,16 @@ class DriveClientError(RuntimeError):
     """
 
 
-class DrivePermanentError(DriveClientError):
+class DrivePermanentError(DriveClientError, SourcePermanentError):
     """A Drive HTTP call failed with a non-retryable 4xx.
 
-    Represents "the resource is gone / rejected / forbidden" — the
+    Represents "the resource is gone / rejected / forbidden": the
     condition won't change if we retry, so callers can log-and-skip and
     move on to whatever's next instead of stalling the pipeline.
     """
 
 
-class DriveTransientError(DriveClientError):
+class DriveTransientError(DriveClientError, SourceTransientError):
     """A Drive HTTP call failed with 5xx / 429 / network error after retries.
 
     The condition is expected to clear with time (backoff, rate-limit
@@ -238,9 +245,9 @@ class DriveClient:
     def service_account_email(self) -> str:
         return self._service_account_email
 
-    def get_metadata(self, file_id: str, fields: str = DEFAULT_FILE_FIELDS) -> FileMetadata:
+    def get_metadata(self, file_id: str, fields: str = DEFAULT_FILE_FIELDS) -> NoteMetadata:
         raw = self._call(lambda: self._service.files().get(fileId=file_id, fields=fields).execute())
-        return FileMetadata.model_validate(raw)
+        return NoteMetadata.model_validate(raw)
 
     def get_start_page_token(self) -> str:
         raw = self._call(
@@ -280,14 +287,13 @@ class DriveClient:
             ) from exc
         return target
 
-    def list_all_notes(self, folder_id: str) -> Iterator[tuple[FileMetadata, str]]:
+    def list_all_notes(self, folder_id: str) -> Iterator[ListedNote]:
         """Walk the folder tree rooted at `folder_id` and yield every .note.
 
-        Each yield is `(file_metadata, source_path)` where `source_path` is
-        the POSIX path relative to `folder_id` (e.g. `Notebooks/2026-07.note`
-        for a note two levels deep). Folder traversal is depth-first via an
-        explicit stack; pagination inside a folder is handled by
-        `_list_children`.
+        Each yield is a `ListedNote` whose `source_path` is the POSIX path
+        relative to `folder_id` (e.g. `Notebooks/2026-07.note` for a note
+        two levels deep). Folder traversal is depth-first via an explicit
+        stack; pagination inside a folder is handled by `_list_children`.
         """
         stack: list[tuple[str, str]] = [(folder_id, "")]
         while stack:
@@ -297,9 +303,9 @@ class DriveClient:
                 if child.mime_type == DRIVE_FOLDER_MIME:
                     stack.append((child.id, child_path))
                 elif child.name.lower().endswith(_NOTE_EXTENSION) and not child.trashed:
-                    yield (child, child_path)
+                    yield ListedNote(metadata=child, source_path=child_path)
 
-    def find_live_note(self, parent_folder_id: str, name: str) -> FileMetadata | None:
+    def find_live_note(self, parent_folder_id: str, name: str) -> NoteMetadata | None:
         """Return a live (non-trashed) file in the given folder matching `name`.
 
         Detects Supernote's replace-then-delete pattern: if a delete
@@ -340,7 +346,7 @@ class DriveClient:
         files = raw.get("files", [])
         if not files:
             return None
-        return FileMetadata.model_validate(files[0])
+        return NoteMetadata.model_validate(files[0])
 
     def stop_channel(self, channel_id: str, resource_id: str) -> None:
         """Stop a push-notification channel. Idempotent from the caller's view.
@@ -440,7 +446,7 @@ class DriveClient:
             self._thread_local.http = http
         return http
 
-    def _list_children(self, folder_id: str) -> Iterator[FileMetadata]:
+    def _list_children(self, folder_id: str) -> Iterator[NoteMetadata]:
         page_token: str | None = None
         # Drive can return the same file id on two consecutive pages if a
         # concurrent edit shifts pagination ordering mid-walk. Track ids
@@ -465,7 +471,7 @@ class DriveClient:
                 )
             )
             for entry in raw.get("files", []):
-                file_metadata = FileMetadata.model_validate(entry)
+                file_metadata = NoteMetadata.model_validate(entry)
                 if file_metadata.id in seen_ids:
                     continue
                 seen_ids.add(file_metadata.id)
@@ -526,3 +532,8 @@ def set_drive_client(client: DriveClient) -> None:
 
 class _Holder:
     client: DriveClient | None = None
+
+
+def _note_source_conformance(client: DriveClient) -> NoteSource:
+    """mypy fails here if DriveClient drifts from the NoteSource protocol."""
+    return client

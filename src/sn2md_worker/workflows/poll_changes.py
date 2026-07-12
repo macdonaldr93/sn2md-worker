@@ -9,9 +9,10 @@ from dbos import DBOS
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.db import sql_session
 from sn2md_worker.drive.client import DriveClient, DrivePermanentError, get_drive_client
-from sn2md_worker.drive.models import ChangeEvent, FileMetadata
+from sn2md_worker.drive.models import ChangeEvent
 from sn2md_worker.drive.paths import resolve_source_path
 from sn2md_worker.logging import get_logger
+from sn2md_worker.sources.models import NoteMetadata
 from sn2md_worker.state import cursor
 from sn2md_worker.workflows.backfill import backfill
 from sn2md_worker.workflows.convert_note import convert_note
@@ -85,9 +86,9 @@ def poll_changes_impl(
             # changes on the same page usually share several ancestors, so
             # one cache pays for the whole walk. Fresh per run so a rename
             # doesn't get served a stale entry on the next poll.
-            metadata_cache: dict[str, FileMetadata] = {}
+            metadata_cache: dict[str, NoteMetadata] = {}
 
-            def cached_get_metadata(fid: str) -> FileMetadata:
+            def cached_get_metadata(fid: str) -> NoteMetadata:
                 if fid not in metadata_cache:
                     metadata_cache[fid] = drive.get_metadata(fid, fields="id,name,parents")
                 return metadata_cache[fid]
@@ -172,7 +173,7 @@ def seed_cursor(drive: DriveClient) -> None:
 
 def _dispatch(
     change: ChangeEvent,
-    get_metadata: Callable[[str], FileMetadata],
+    get_metadata: Callable[[str], NoteMetadata],
     settings: Settings,
 ) -> bool:
     """Enqueue convert_note (or delete_output) for eligible changes."""

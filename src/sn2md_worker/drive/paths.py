@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from sn2md_worker.drive.models import FileMetadata
+from sn2md_worker.sources.models import NoteMetadata
 
 __all__ = ["MAX_PATH_DEPTH", "resolve_source_path"]
 
@@ -15,7 +15,7 @@ def resolve_source_path(
     *,
     file_id: str,
     root_folder_id: str,
-    get_metadata: Callable[[str], FileMetadata],
+    get_metadata: Callable[[str], NoteMetadata],
 ) -> str | None:
     """Return the file's POSIX path relative to `root_folder_id`.
 
@@ -37,7 +37,7 @@ def resolve_source_path(
 def _resolve(
     file_id: str,
     root_folder_id: str,
-    get_metadata: Callable[[str], FileMetadata],
+    get_metadata: Callable[[str], NoteMetadata],
     remaining_depth: int,
 ) -> str | None:
     if remaining_depth <= 0:

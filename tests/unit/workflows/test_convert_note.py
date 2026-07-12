@@ -15,7 +15,7 @@ from sn2md_worker.config import Settings, Sn2mdConfig, VaultConfig
 from sn2md_worker.conversion.multi_page import MultiPageResult, PageOutcome
 from sn2md_worker.db import set_engine
 from sn2md_worker.drive.client import DriveClient
-from sn2md_worker.drive.models import FileMetadata
+from sn2md_worker.sources.models import NoteMetadata
 from sn2md_worker.state import conversions, page_conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
@@ -50,7 +50,7 @@ def drive() -> MagicMock:
     return MagicMock(spec=DriveClient)
 
 
-def _file_metadata(**overrides: object) -> FileMetadata:
+def _file_metadata(**overrides: object) -> NoteMetadata:
     base: dict[str, object] = {
         "id": "file-1",
         "name": "2026-07.note",
@@ -61,7 +61,7 @@ def _file_metadata(**overrides: object) -> FileMetadata:
         "trashed": False,
     }
     base.update(overrides)
-    return FileMetadata.model_validate(base)
+    return NoteMetadata.model_validate(base)
 
 
 def _seed_conversion(

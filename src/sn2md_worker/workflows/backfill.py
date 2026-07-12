@@ -45,7 +45,9 @@ def backfill_impl(*, drive: DriveClient, settings: Settings) -> None:
             enqueued = 0
             skipped = 0
             unsafe = 0
-            for file, source_path in drive.list_all_notes(settings.drive.source_folder_id):
+            for listed in drive.list_all_notes(settings.drive.source_folder_id):
+                file = listed.metadata
+                source_path = listed.source_path
                 try:
                     key = logical_key(source_path)
                 except UnsafePathError as exc:

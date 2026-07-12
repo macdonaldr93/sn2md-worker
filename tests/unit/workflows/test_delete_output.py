@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from sn2md_worker.config import Settings, VaultConfig
 from sn2md_worker.db import set_engine
 from sn2md_worker.drive.client import DriveClient
-from sn2md_worker.drive.models import FileMetadata
+from sn2md_worker.sources.models import NoteMetadata
 from sn2md_worker.state import conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
@@ -94,7 +94,7 @@ class TestWhenLiveFileStillExistsAtSameLocation:
         # file with the same name at the same parent (Supernote replace pattern)
         _seed_record(engine, file_id="file-old", parent_folder_id="parent-1")
         note_dir = _seed_output_dir(vault_root)
-        drive.find_live_note.return_value = FileMetadata(
+        drive.find_live_note.return_value = NoteMetadata(
             id="file-new", name="2026-07.note", parents=("parent-1",)
         )
 

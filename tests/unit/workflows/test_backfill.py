@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from sn2md_worker.config import DriveConfig, Settings
 from sn2md_worker.db import set_engine
 from sn2md_worker.drive.client import DriveClient
-from sn2md_worker.drive.models import FileMetadata
+from sn2md_worker.sources.models import ListedNote, NoteMetadata
 from sn2md_worker.state import conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
@@ -43,13 +43,16 @@ def drive() -> MagicMock:
     return MagicMock(spec=DriveClient)
 
 
-def _file(file_id: str, *, name: str = "note.note", md5: str = "abc") -> FileMetadata:
-    return FileMetadata(
+def _listed(
+    file_id: str, source_path: str, *, name: str = "note.note", md5: str = "abc"
+) -> ListedNote:
+    metadata = NoteMetadata(
         id=file_id,
         name=name,
         md5Checksum=md5,
         parents=(SOURCE_FOLDER_ID,),
     )
+    return ListedNote(metadata=metadata, source_path=source_path)
 
 
 def _seed_success(
@@ -84,9 +87,9 @@ class TestWhenNothingIsConvertedYet:
         # GIVEN — three notes in Drive at various depths
         drive.list_all_notes.return_value = iter(
             [
-                (_file("f1", name="2026-07.note"), "Notebooks/2026-07.note"),
-                (_file("f2", name="2026-08.note"), "Notebooks/2026-08.note"),
-                (_file("f3", name="stray.note"), "stray.note"),
+                _listed("f1", "Notebooks/2026-07.note", name="2026-07.note"),
+                _listed("f2", "Notebooks/2026-08.note", name="2026-08.note"),
+                _listed("f3", "stray.note", name="stray.note"),
             ]
         )
 
@@ -123,9 +126,9 @@ class TestWhenNotesAreAlreadyConverted:
         )
         drive.list_all_notes.return_value = iter(
             [
-                (_file("f-kept", md5="same-md5"), "Notebooks/kept.note"),
-                (_file("f-stale-new", md5="NEW-md5"), "Notebooks/stale.note"),
-                (_file("f-fresh", md5="fresh-md5"), "Notebooks/fresh.note"),
+                _listed("f-kept", "Notebooks/kept.note", md5="same-md5"),
+                _listed("f-stale-new", "Notebooks/stale.note", md5="NEW-md5"),
+                _listed("f-fresh", "Notebooks/fresh.note", md5="fresh-md5"),
             ]
         )
 
@@ -152,7 +155,7 @@ class TestWhenPreviousRunEndedInError:
             status=ConversionStatus.ERROR,
         )
         drive.list_all_notes.return_value = iter(
-            [(_file("f-failed", md5="abc"), "Notebooks/failed.note")]
+            [_listed("f-failed", "Notebooks/failed.note", md5="abc")]
         )
 
         # WHEN
@@ -179,7 +182,7 @@ class TestConversionRecordsAreBulkLoadedOnce:
                 md5=f"md5-{i}",
             )
         drive.list_all_notes.return_value = iter(
-            [(_file(f"f{i}", md5="new-md5"), f"Notebooks/f{i}.note") for i in range(3)]
+            [_listed(f"f{i}", f"Notebooks/f{i}.note", md5="new-md5") for i in range(3)]
         )
 
         # WHEN — spy on list_all_by_key while running
