@@ -27,9 +27,9 @@ __all__ = [
 # 48h headroom against the daily 06:00 UTC cron: a channel is still
 # eligible for renewal on the run before its final day, so a single
 # missed cron (container down for a day) doesn't leave the channel
-# expiring silently. Combined with the startup recovery poll below,
-# a missed-notifications window is bounded even without a fallback
-# poll_changes cron.
+# expiring silently. The startup recovery poll below and the
+# fallback-poll-changes cron keep the missed-notifications window
+# bounded.
 RENEWAL_HEADROOM = timedelta(hours=48)
 
 _log = get_logger("sn2md_worker.workflows.renew_watch")
@@ -112,10 +112,10 @@ def ensure_active_channel(drive: DriveClient | None, settings: Settings) -> None
 
     If the previously-active channel has already expired at boot, also
     enqueues a `poll_changes("recovery")` to catch up on notifications
-    Drive sent while our webhook wasn't listening — needed because we
-    don't run a fallback `poll_changes` cron. The recovery poll uses
-    whatever `drive_change_cursor` we last persisted, so it walks from
-    the last confirmed point rather than the current head.
+    Drive sent while our webhook wasn't listening, without waiting for
+    the next fallback-poll cron tick. The recovery poll uses whatever
+    `drive_change_cursor` we last persisted, so it walks from the last
+    confirmed point rather than the current head.
     """
     if drive is None:
         _log.warning("renew_watch_skipped", trigger="startup", reason="no_drive_client")

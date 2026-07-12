@@ -123,7 +123,7 @@ src/sn2md_worker/
 
 ```sh
 uv sync                      # install deps + local package
-uv run pytest                # 247 tests
+uv run pytest                # 261 tests
 uv run ruff check src tests scripts
 uv run ruff format src tests scripts
 uv run mypy src
@@ -184,6 +184,8 @@ Some are user preferences saved to memory; some are project-specific:
   `backfill`), and `ensure_active_channel`'s recovery poll on boot.
   Renewal also enqueues a catch-up `poll_changes("renewal")` when it
   swaps an existing channel, closing the seam mid-swap.
-- Hash-first page cache (v1 keys on `(logical_key, page_index)` — a
-  page inserted mid-note re-runs downstream pages through Gemini).
-  Fixable with hash-first matching if it becomes painful.
+- ~~Hash-first page cache~~ - now implemented (2026-07-05, commit
+  82f8a67). `conversion/multi_page._preload_cached_bodies` indexes
+  prior page bodies by md5, so a page inserted mid-note re-converts
+  only the new page instead of re-running downstream pages through
+  Gemini.
