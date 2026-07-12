@@ -221,8 +221,8 @@ Runs continuously as a Docker container on my Unraid server.
 
 ### Testing
 
-- **Unit tests** (`tests/unit/`): 285 tests as of 2026-07-12,
-  in-memory SQLite. BDD scenario classes for behavior (workflows,
+- **Unit tests** (`tests/unit/`): in-memory SQLite throughout.
+  BDD scenario classes for behavior (workflows,
   webhook, repos); plain
   functions for pure logic (path helpers, model alias mapping,
   TypeDecorator).

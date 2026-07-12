@@ -125,7 +125,7 @@ src/sn2md_worker/
 
 ```sh
 uv sync                      # install deps + local package
-uv run pytest                # 285 tests
+uv run pytest                # full unit suite
 uv run ruff check src tests scripts
 uv run ruff format src tests scripts
 uv run mypy src

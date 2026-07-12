@@ -1033,9 +1033,8 @@ links back to DBOS's own workflow row for retry forensics.
 
 ## 15. Testing strategy
 
-**285 unit tests** (as of 2026-07-12), in-memory SQLite. All tests
-live under `tests/unit/` mirroring the source layout (per-project
-convention).
+Unit tests run against in-memory SQLite. All tests live under
+`tests/unit/` mirroring the source layout (per-project convention).
 Two shapes:
 
 - **BDD scenario classes** for behavior — `TestWhen<Scenario>` with
