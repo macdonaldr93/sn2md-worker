@@ -8,8 +8,9 @@ from dbos import DBOS
 
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.db import sql_session
-from sn2md_worker.drive.client import DriveClient, get_drive_client
+from sn2md_worker.drive.client import get_drive_client
 from sn2md_worker.logging import get_logger
+from sn2md_worker.sources.protocol import NoteSource
 from sn2md_worker.state import conversions, page_conversions
 from sn2md_worker.workflows.convert_note import convert_note
 from sn2md_worker.workflows.locks import lock_for
@@ -24,7 +25,7 @@ _log = get_logger("sn2md_worker.workflows.delete_output")
 def delete_output(file_id: str) -> None:
     delete_output_impl(
         file_id=file_id,
-        drive=get_drive_client(),
+        source=get_drive_client(),
         settings=get_settings(),
     )
 
@@ -32,7 +33,7 @@ def delete_output(file_id: str) -> None:
 def delete_output_impl(
     *,
     file_id: str,
-    drive: DriveClient,
+    source: NoteSource,
     settings: Settings,
 ) -> None:
     """Mirror a Drive removal into the vault, with Supernote replace-safety.
@@ -61,7 +62,7 @@ def delete_output_impl(
                     return
 
                 if record.parent_folder_id:
-                    live = drive.find_live_note(record.parent_folder_id, record.source_name)
+                    live = source.find_live_note(record.parent_folder_id, record.source_name)
                     if live is not None and live.id != file_id:
                         _repoint(logical_key=record.logical_key, new_file_id=live.id)
                         # Guards against a delete-side push without a

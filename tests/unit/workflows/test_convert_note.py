@@ -14,8 +14,8 @@ from sqlalchemy.orm import Session
 from sn2md_worker.config import Settings, Sn2mdConfig, VaultConfig
 from sn2md_worker.conversion.multi_page import MultiPageResult, PageOutcome
 from sn2md_worker.db import set_engine
-from sn2md_worker.drive.client import DriveClient
 from sn2md_worker.sources.models import NoteMetadata
+from sn2md_worker.sources.protocol import NoteSource
 from sn2md_worker.state import conversions, page_conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
@@ -46,8 +46,8 @@ def settings(tmp_path: Path) -> Settings:
 
 
 @pytest.fixture
-def drive() -> MagicMock:
-    return MagicMock(spec=DriveClient)
+def source() -> MagicMock:
+    return MagicMock(spec=NoteSource)
 
 
 def _file_metadata(**overrides: object) -> NoteMetadata:
@@ -98,13 +98,13 @@ def _seed_page(engine: Engine, *, page_index: int, page_md5: str) -> None:
         )
 
 
-def _stub_download(drive: MagicMock) -> None:
+def _stub_download(source: MagicMock) -> None:
     def fake(file_id: str, dest_dir: Path, name: str) -> Path:
         target = dest_dir / name
         target.write_bytes(b"note-data")
         return target
 
-    drive.download.side_effect = fake
+    source.download.side_effect = fake
 
 
 def _fake_result(*, pages: int, cached: dict[int, bool] | None = None) -> MultiPageResult:
@@ -137,11 +137,11 @@ def _run_stub(*, pages: int, cached: dict[int, bool] | None = None) -> object:
 
 class TestWhenConvertingANoteForTheFirstTime:
     def test_runs_multi_page_and_persists_a_success_record_and_page_rows(
-        self, engine: Engine, settings: Settings, drive: MagicMock, tmp_path: Path
+        self, engine: Engine, settings: Settings, source: MagicMock, tmp_path: Path
     ) -> None:
         # GIVEN
-        drive.get_metadata.return_value = _file_metadata()
-        _stub_download(drive)
+        source.get_metadata.return_value = _file_metadata()
+        _stub_download(source)
 
         # WHEN
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
@@ -149,7 +149,7 @@ class TestWhenConvertingANoteForTheFirstTime:
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/Journal/2026-07.note",
-                drive=drive,
+                source=source,
                 settings=settings,
             )
 
@@ -173,14 +173,14 @@ class TestWhenConvertingANoteForTheFirstTime:
 
 class TestWhenAllPagesAreCached:
     def test_still_records_success_without_regenerating_state(
-        self, engine: Engine, settings: Settings, drive: MagicMock
+        self, engine: Engine, settings: Settings, source: MagicMock
     ) -> None:
         # GIVEN — a previous conversion with 2 pages
         _seed_conversion(engine, file_id="file-old", md5="old-md5")
         _seed_page(engine, page_index=0, page_md5="md5-p0")
         _seed_page(engine, page_index=1, page_md5="md5-p1")
-        drive.get_metadata.return_value = _file_metadata(id="file-new", md5Checksum="new-md5")
-        _stub_download(drive)
+        source.get_metadata.return_value = _file_metadata(id="file-new", md5Checksum="new-md5")
+        _stub_download(source)
 
         # WHEN — the note re-converts with all pages reporting cache hits
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
@@ -188,7 +188,7 @@ class TestWhenAllPagesAreCached:
             convert_note_impl(
                 file_id="file-new",
                 source_path="Notebooks/2026-07.note",
-                drive=drive,
+                source=source,
                 settings=settings,
             )
 
@@ -201,13 +201,13 @@ class TestWhenAllPagesAreCached:
 
 class TestWhenTheNoteHasFewerPagesThanBefore:
     def test_prunes_page_rows_beyond_the_new_page_count(
-        self, engine: Engine, settings: Settings, drive: MagicMock
+        self, engine: Engine, settings: Settings, source: MagicMock
     ) -> None:
         # GIVEN — a stale 3-page state
         for i in range(3):
             _seed_page(engine, page_index=i, page_md5=f"md5-old-{i}")
-        drive.get_metadata.return_value = _file_metadata()
-        _stub_download(drive)
+        source.get_metadata.return_value = _file_metadata()
+        _stub_download(source)
 
         # WHEN — the current note has only 2 pages
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
@@ -215,7 +215,7 @@ class TestWhenTheNoteHasFewerPagesThanBefore:
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
-                drive=drive,
+                source=source,
                 settings=settings,
             )
 
@@ -225,15 +225,15 @@ class TestWhenTheNoteHasFewerPagesThanBefore:
         assert [p.page_index for p in pages] == [0, 1]
 
     def test_removes_stale_page_files_from_disk(
-        self, engine: Engine, settings: Settings, drive: MagicMock, tmp_path: Path
+        self, engine: Engine, settings: Settings, source: MagicMock, tmp_path: Path
     ) -> None:
         # GIVEN — a stale page file left over from a prior 3-page conversion
         note_dir = tmp_path / "vault" / "Notebooks" / "2026-07"
         note_dir.mkdir(parents=True)
         (note_dir / "page-03.md").write_text("stale")
         (note_dir / "page-03.png").write_bytes(b"stale-png")
-        drive.get_metadata.return_value = _file_metadata()
-        _stub_download(drive)
+        source.get_metadata.return_value = _file_metadata()
+        _stub_download(source)
 
         # WHEN
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
@@ -241,7 +241,7 @@ class TestWhenTheNoteHasFewerPagesThanBefore:
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
-                drive=drive,
+                source=source,
                 settings=settings,
             )
 
@@ -255,7 +255,7 @@ class TestWhenAPngOnlyOrphanExists:
         self,
         engine: Engine,
         settings: Settings,
-        drive: MagicMock,
+        source: MagicMock,
         tmp_path: Path,  # noqa: ARG002
     ) -> None:
         # GIVEN — page-04.png with no peer page-04.md (a crash between
@@ -263,8 +263,8 @@ class TestWhenAPngOnlyOrphanExists:
         note_dir = tmp_path / "vault" / "Notebooks" / "2026-07"
         note_dir.mkdir(parents=True)
         (note_dir / "page-04.png").write_bytes(b"orphan-png")
-        drive.get_metadata.return_value = _file_metadata()
-        _stub_download(drive)
+        source.get_metadata.return_value = _file_metadata()
+        _stub_download(source)
 
         # WHEN — the new conversion produces 2 pages
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
@@ -272,7 +272,7 @@ class TestWhenAPngOnlyOrphanExists:
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
-                drive=drive,
+                source=source,
                 settings=settings,
             )
 
@@ -282,15 +282,15 @@ class TestWhenAPngOnlyOrphanExists:
 
 class TestWhenAnOldFlatMarkdownFileExists:
     def test_cleans_up_the_legacy_flat_md_and_sidecar(
-        self, engine: Engine, settings: Settings, drive: MagicMock, tmp_path: Path
+        self, engine: Engine, settings: Settings, source: MagicMock, tmp_path: Path
     ) -> None:
         # GIVEN — a pre-multi-page single-file conversion
         note_dir = tmp_path / "vault" / "Notebooks" / "2026-07"
         note_dir.mkdir(parents=True)
         (note_dir / "2026-07.md").write_text("legacy flat")
         (note_dir / ".sn2md.metadata.yaml").write_text("v1")
-        drive.get_metadata.return_value = _file_metadata()
-        _stub_download(drive)
+        source.get_metadata.return_value = _file_metadata()
+        _stub_download(source)
 
         # WHEN
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
@@ -298,7 +298,7 @@ class TestWhenAnOldFlatMarkdownFileExists:
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
-                drive=drive,
+                source=source,
                 settings=settings,
             )
 
@@ -309,52 +309,52 @@ class TestWhenAnOldFlatMarkdownFileExists:
 
 class TestWhenTheRecordIsAlreadyUpToDate:
     def test_neither_downloads_nor_reruns(
-        self, engine: Engine, settings: Settings, drive: MagicMock
+        self, engine: Engine, settings: Settings, source: MagicMock
     ) -> None:
         # GIVEN
         _seed_conversion(engine, file_id="file-1", md5="abc123")
-        drive.get_metadata.return_value = _file_metadata()
+        source.get_metadata.return_value = _file_metadata()
 
         # WHEN
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
-                drive=drive,
+                source=source,
                 settings=settings,
             )
 
         # THEN
         fake_run.assert_not_called()
-        drive.download.assert_not_called()
+        source.download.assert_not_called()
 
 
 class TestWhenTheFileIsTrashed:
     def test_neither_downloads_nor_runs(
-        self, engine: Engine, settings: Settings, drive: MagicMock
+        self, engine: Engine, settings: Settings, source: MagicMock
     ) -> None:
         # GIVEN
-        drive.get_metadata.return_value = _file_metadata(trashed=True)
+        source.get_metadata.return_value = _file_metadata(trashed=True)
 
         # WHEN
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
-                drive=drive,
+                source=source,
                 settings=settings,
             )
 
         # THEN
         fake_run.assert_not_called()
-        drive.download.assert_not_called()
+        source.download.assert_not_called()
 
 
 class TestWhenNoGeminiKeyIsConfigured:
     def test_raises_a_configuration_error(
         self,
         engine: Engine,
-        drive: MagicMock,
+        source: MagicMock,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -364,8 +364,8 @@ class TestWhenNoGeminiKeyIsConfigured:
             vault=VaultConfig(root_path=tmp_path / "vault", mirror_source_layout=True),
             sn2md=Sn2mdConfig(model="fake", api_key=None),
         )
-        drive.get_metadata.return_value = _file_metadata()
-        _stub_download(drive)
+        source.get_metadata.return_value = _file_metadata()
+        _stub_download(source)
 
         # WHEN / THEN
         with (
@@ -375,14 +375,14 @@ class TestWhenNoGeminiKeyIsConfigured:
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
-                drive=drive,
+                source=source,
                 settings=settings,
             )
 
     def test_falls_back_to_llm_gemini_key_env_var(
         self,
         engine: Engine,
-        drive: MagicMock,
+        source: MagicMock,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -392,8 +392,8 @@ class TestWhenNoGeminiKeyIsConfigured:
             vault=VaultConfig(root_path=tmp_path / "vault", mirror_source_layout=True),
             sn2md=Sn2mdConfig(model="fake-model", api_key=None),
         )
-        drive.get_metadata.return_value = _file_metadata()
-        _stub_download(drive)
+        source.get_metadata.return_value = _file_metadata()
+        _stub_download(source)
 
         # WHEN
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
@@ -401,7 +401,7 @@ class TestWhenNoGeminiKeyIsConfigured:
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
-                drive=drive,
+                source=source,
                 settings=settings,
             )
 
@@ -412,11 +412,11 @@ class TestWhenNoGeminiKeyIsConfigured:
 
 class TestWhenTheWorkflowCrashesMidNote:
     def test_pages_persisted_before_the_crash_remain_in_the_db(
-        self, engine: Engine, settings: Settings, drive: MagicMock
+        self, engine: Engine, settings: Settings, source: MagicMock
     ) -> None:
         # GIVEN — callback fires for pages 0, 1, then run_multi_page raises.
-        drive.get_metadata.return_value = _file_metadata()
-        _stub_download(drive)
+        source.get_metadata.return_value = _file_metadata()
+        _stub_download(source)
 
         def crash_after_two_pages(**kwargs: object) -> MultiPageResult:
             cb = kwargs.get("on_page_done")
@@ -443,7 +443,7 @@ class TestWhenTheWorkflowCrashesMidNote:
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
-                drive=drive,
+                source=source,
                 settings=settings,
             )
 
@@ -459,11 +459,11 @@ class TestWhenTheWorkflowCrashesMidNote:
 
 class TestPendingRecordWrittenBeforeMultiPageRuns:
     def test_parent_record_exists_as_pending_when_run_multi_page_starts(
-        self, engine: Engine, settings: Settings, drive: MagicMock
+        self, engine: Engine, settings: Settings, source: MagicMock
     ) -> None:
         # GIVEN
-        drive.get_metadata.return_value = _file_metadata()
-        _stub_download(drive)
+        source.get_metadata.return_value = _file_metadata()
+        _stub_download(source)
         observed_status: dict[str, str] = {}
 
         def check_record(**kwargs: object) -> MultiPageResult:  # noqa: ARG001
@@ -481,7 +481,7 @@ class TestPendingRecordWrittenBeforeMultiPageRuns:
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
-                drive=drive,
+                source=source,
                 settings=settings,
             )
 
@@ -496,14 +496,14 @@ class TestPendingRecordWrittenBeforeMultiPageRuns:
 class TestConvertNoteAcquiresLockAroundWork:
     def test_lock_for_is_invoked_with_the_logical_key(
         self,
-        drive: MagicMock,
+        source: MagicMock,
         settings: Settings,
         engine: Engine,  # noqa: ARG002
         tmp_path: Path,  # noqa: ARG002
     ) -> None:
         # GIVEN
-        drive.get_metadata.return_value = _file_metadata()
-        _stub_download(drive)
+        source.get_metadata.return_value = _file_metadata()
+        _stub_download(source)
 
         # WHEN — spy on the lock helper as imported into convert_note
         with (
@@ -517,7 +517,7 @@ class TestConvertNoteAcquiresLockAroundWork:
             convert_note_impl(
                 file_id="file-1",
                 source_path="Notebooks/2026-07.note",
-                drive=drive,
+                source=source,
                 settings=settings,
             )
 

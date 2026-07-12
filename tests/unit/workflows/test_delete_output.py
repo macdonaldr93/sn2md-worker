@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 
 from sn2md_worker.config import Settings, VaultConfig
 from sn2md_worker.db import set_engine
-from sn2md_worker.drive.client import DriveClient
 from sn2md_worker.sources.models import NoteMetadata
+from sn2md_worker.sources.protocol import NoteSource
 from sn2md_worker.state import conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
@@ -47,8 +47,8 @@ def settings(vault_root: Path) -> Settings:
 
 
 @pytest.fixture
-def drive() -> MagicMock:
-    return MagicMock(spec=DriveClient)
+def source() -> MagicMock:
+    return MagicMock(spec=NoteSource)
 
 
 def _seed_record(engine: Engine, *, file_id: str, parent_folder_id: str) -> None:
@@ -78,29 +78,29 @@ def _seed_output_dir(vault_root: Path) -> Path:
 
 
 class TestWhenNoRecordExistsForFileId:
-    def test_is_a_noop(self, engine: Engine, settings: Settings, drive: MagicMock) -> None:
+    def test_is_a_noop(self, engine: Engine, settings: Settings, source: MagicMock) -> None:
         # WHEN
-        delete_output_impl(file_id="unknown", drive=drive, settings=settings)
+        delete_output_impl(file_id="unknown", source=source, settings=settings)
 
         # THEN — no Drive call, no exception
-        drive.find_live_note.assert_not_called()
+        source.find_live_note.assert_not_called()
 
 
 class TestWhenLiveFileStillExistsAtSameLocation:
     def test_repoints_current_file_id_without_deleting_vault(
-        self, engine: Engine, settings: Settings, drive: MagicMock, vault_root: Path
+        self, engine: Engine, settings: Settings, source: MagicMock, vault_root: Path
     ) -> None:
         # GIVEN — a stored record for the OLD file id, and Drive still has a live
         # file with the same name at the same parent (Supernote replace pattern)
         _seed_record(engine, file_id="file-old", parent_folder_id="parent-1")
         note_dir = _seed_output_dir(vault_root)
-        drive.find_live_note.return_value = NoteMetadata(
+        source.find_live_note.return_value = NoteMetadata(
             id="file-new", name="2026-07.note", parents=("parent-1",)
         )
 
         # WHEN
         with patch("sn2md_worker.workflows.delete_output.DBOS.enqueue_workflow") as enqueue:
-            delete_output_impl(file_id="file-old", drive=drive, settings=settings)
+            delete_output_impl(file_id="file-old", source=source, settings=settings)
 
         # THEN — vault output remains
         assert (note_dir / "2026-07.md").exists()
@@ -123,15 +123,15 @@ class TestWhenLiveFileStillExistsAtSameLocation:
 
 class TestWhenNoLiveFileExistsAtSameLocation:
     def test_removes_vault_output_and_record(
-        self, engine: Engine, settings: Settings, drive: MagicMock, vault_root: Path
+        self, engine: Engine, settings: Settings, source: MagicMock, vault_root: Path
     ) -> None:
         # GIVEN — record + on-disk output, Drive returns None
         _seed_record(engine, file_id="file-1", parent_folder_id="parent-1")
         note_dir = _seed_output_dir(vault_root)
-        drive.find_live_note.return_value = None
+        source.find_live_note.return_value = None
 
         # WHEN
-        delete_output_impl(file_id="file-1", drive=drive, settings=settings)
+        delete_output_impl(file_id="file-1", source=source, settings=settings)
 
         # THEN — the per-note directory is gone
         assert not note_dir.exists()
@@ -144,7 +144,7 @@ class TestWhenNoLiveFileExistsAtSameLocation:
 
 class TestWhenRecordHasNoParentFolderId:
     def test_falls_through_to_delete_without_drive_check(
-        self, engine: Engine, settings: Settings, drive: MagicMock, vault_root: Path
+        self, engine: Engine, settings: Settings, source: MagicMock, vault_root: Path
     ) -> None:
         # GIVEN — legacy record with no parent_folder_id
         with Session(engine) as session, session.begin():
@@ -165,16 +165,16 @@ class TestWhenRecordHasNoParentFolderId:
         note_dir = _seed_output_dir(vault_root)
 
         # WHEN
-        delete_output_impl(file_id="file-1", drive=drive, settings=settings)
+        delete_output_impl(file_id="file-1", source=source, settings=settings)
 
         # THEN — no Drive lookup, vault deleted
-        drive.find_live_note.assert_not_called()
+        source.find_live_note.assert_not_called()
         assert not note_dir.exists()
 
 
 class TestWhenOutputRelPathIsEmpty:
     def test_refuses_to_delete(
-        self, engine: Engine, settings: Settings, drive: MagicMock, vault_root: Path
+        self, engine: Engine, settings: Settings, source: MagicMock, vault_root: Path
     ) -> None:
         # GIVEN — a corrupt record with empty output_rel_path
         with Session(engine) as session, session.begin():
@@ -192,13 +192,13 @@ class TestWhenOutputRelPathIsEmpty:
                     status=ConversionStatus.SUCCESS,
                 ),
             )
-        drive.find_live_note.return_value = None
+        source.find_live_note.return_value = None
         # Seed something in the vault to prove we don't touch it
         stray = vault_root / "important"
         stray.mkdir()
 
         # WHEN
-        delete_output_impl(file_id="file-1", drive=drive, settings=settings)
+        delete_output_impl(file_id="file-1", source=source, settings=settings)
 
         # THEN — vault root and its contents are untouched
         assert stray.exists()
@@ -212,20 +212,20 @@ class TestDeleteOutputAcquiresLockAroundWork:
         self,
         engine: Engine,  # noqa: ARG002
         settings: Settings,
-        drive: MagicMock,
+        source: MagicMock,
         vault_root: Path,
     ) -> None:
         # GIVEN
         _seed_record(engine, file_id="file-1", parent_folder_id="parent-1")
         _seed_output_dir(vault_root)
-        drive.find_live_note.return_value = None
+        source.find_live_note.return_value = None
 
         # WHEN
         with patch(
             "sn2md_worker.workflows.delete_output.lock_for",
             wraps=lock_for,
         ) as spy:
-            delete_output_impl(file_id="file-1", drive=drive, settings=settings)
+            delete_output_impl(file_id="file-1", source=source, settings=settings)
 
         # THEN — locked before rmtree'ing under a possibly-concurrent convert.
         spy.assert_called_once_with(LOGICAL_KEY)
@@ -236,7 +236,7 @@ class TestWhenTheRecordIsRepointedByAConcurrentConvert:
         self,
         engine: Engine,
         settings: Settings,
-        drive: MagicMock,
+        source: MagicMock,
         vault_root: Path,
     ) -> None:
         # GIVEN — a convert repoints current_file_id between our two reads.
@@ -260,10 +260,10 @@ class TestWhenTheRecordIsRepointedByAConcurrentConvert:
             "sn2md_worker.workflows.delete_output.conversions.get_by_current_file_id",
             side_effect=racy_get,
         ):
-            delete_output_impl(file_id="file-1", drive=drive, settings=settings)
+            delete_output_impl(file_id="file-1", source=source, settings=settings)
 
         # THEN — bails with no_record_after_lock; vault + record intact.
-        drive.find_live_note.assert_not_called()
+        source.find_live_note.assert_not_called()
         assert (vault_root / "Notebooks" / "2026-07" / "2026-07.md").exists()
         with Session(engine) as session:
             assert conversions.get_by_logical_key(session, LOGICAL_KEY) is not None
@@ -271,7 +271,12 @@ class TestWhenTheRecordIsRepointedByAConcurrentConvert:
 
 class TestWhenOutputRelPathEscapesVault:
     def test_refuses_to_delete_paths_outside_vault(
-        self, engine: Engine, settings: Settings, drive: MagicMock, vault_root: Path, tmp_path: Path
+        self,
+        engine: Engine,
+        settings: Settings,
+        source: MagicMock,
+        vault_root: Path,
+        tmp_path: Path,
     ) -> None:
         # GIVEN — a malicious/corrupt record that walks up out of the vault
         outside = tmp_path / "outside"
@@ -293,10 +298,10 @@ class TestWhenOutputRelPathEscapesVault:
                     status=ConversionStatus.SUCCESS,
                 ),
             )
-        drive.find_live_note.return_value = None
+        source.find_live_note.return_value = None
 
         # WHEN
-        delete_output_impl(file_id="file-1", drive=drive, settings=settings)
+        delete_output_impl(file_id="file-1", source=source, settings=settings)
 
         # THEN — the outside directory is untouched
         assert (outside / "canary.txt").exists()

@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 
 from sn2md_worker.config import DriveConfig, Settings
 from sn2md_worker.db import set_engine
-from sn2md_worker.drive.client import DriveClient
 from sn2md_worker.sources.models import ListedNote, NoteMetadata
+from sn2md_worker.sources.protocol import NoteSource
 from sn2md_worker.state import conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
@@ -39,8 +39,8 @@ def settings() -> Settings:
 
 
 @pytest.fixture
-def drive() -> MagicMock:
-    return MagicMock(spec=DriveClient)
+def source() -> MagicMock:
+    return MagicMock(spec=NoteSource)
 
 
 def _listed(
@@ -82,10 +82,10 @@ def _seed_success(
 
 class TestWhenNothingIsConvertedYet:
     def test_enqueues_every_note_found_in_drive(
-        self, engine: Engine, settings: Settings, drive: MagicMock
+        self, engine: Engine, settings: Settings, source: MagicMock
     ) -> None:
         # GIVEN — three notes in Drive at various depths
-        drive.list_all_notes.return_value = iter(
+        source.list_all_notes.return_value = iter(
             [
                 _listed("f1", "Notebooks/2026-07.note", name="2026-07.note"),
                 _listed("f2", "Notebooks/2026-08.note", name="2026-08.note"),
@@ -95,7 +95,7 @@ class TestWhenNothingIsConvertedYet:
 
         # WHEN
         with patch("sn2md_worker.workflows.backfill.DBOS.enqueue_workflow") as enqueue:
-            backfill_impl(drive=drive, settings=settings)
+            backfill_impl(source=source, settings=settings)
 
         # THEN — every note is enqueued
         assert enqueue.call_count == 3
@@ -109,7 +109,7 @@ class TestWhenNothingIsConvertedYet:
 
 class TestWhenNotesAreAlreadyConverted:
     def test_skips_notes_whose_md5_matches_and_status_is_success(
-        self, engine: Engine, settings: Settings, drive: MagicMock
+        self, engine: Engine, settings: Settings, source: MagicMock
     ) -> None:
         # GIVEN — one note already up-to-date, one with different md5, one missing
         _seed_success(
@@ -124,7 +124,7 @@ class TestWhenNotesAreAlreadyConverted:
             file_id="f-stale",
             md5="OLD-md5",
         )
-        drive.list_all_notes.return_value = iter(
+        source.list_all_notes.return_value = iter(
             [
                 _listed("f-kept", "Notebooks/kept.note", md5="same-md5"),
                 _listed("f-stale-new", "Notebooks/stale.note", md5="NEW-md5"),
@@ -134,7 +134,7 @@ class TestWhenNotesAreAlreadyConverted:
 
         # WHEN
         with patch("sn2md_worker.workflows.backfill.DBOS.enqueue_workflow") as enqueue:
-            backfill_impl(drive=drive, settings=settings)
+            backfill_impl(source=source, settings=settings)
 
         # THEN — only the changed and missing notes are enqueued
         assert enqueue.call_count == 2
@@ -144,7 +144,7 @@ class TestWhenNotesAreAlreadyConverted:
 
 class TestWhenPreviousRunEndedInError:
     def test_reenqueues_notes_with_error_status(
-        self, engine: Engine, settings: Settings, drive: MagicMock
+        self, engine: Engine, settings: Settings, source: MagicMock
     ) -> None:
         # GIVEN — a record with matching md5 but ERROR status
         _seed_success(
@@ -154,13 +154,13 @@ class TestWhenPreviousRunEndedInError:
             md5="abc",
             status=ConversionStatus.ERROR,
         )
-        drive.list_all_notes.return_value = iter(
+        source.list_all_notes.return_value = iter(
             [_listed("f-failed", "Notebooks/failed.note", md5="abc")]
         )
 
         # WHEN
         with patch("sn2md_worker.workflows.backfill.DBOS.enqueue_workflow") as enqueue:
-            backfill_impl(drive=drive, settings=settings)
+            backfill_impl(source=source, settings=settings)
 
         # THEN — still enqueued despite the md5 match
         enqueue.assert_called_once()
@@ -171,7 +171,7 @@ class TestConversionRecordsAreBulkLoadedOnce:
         self,
         engine: Engine,
         settings: Settings,
-        drive: MagicMock,  # noqa: ARG002
+        source: MagicMock,  # noqa: ARG002
     ) -> None:
         # GIVEN — three seeded records + three Drive files
         for i in range(3):
@@ -181,7 +181,7 @@ class TestConversionRecordsAreBulkLoadedOnce:
                 file_id=f"seed-{i}",
                 md5=f"md5-{i}",
             )
-        drive.list_all_notes.return_value = iter(
+        source.list_all_notes.return_value = iter(
             [_listed(f"f{i}", f"Notebooks/f{i}.note", md5="new-md5") for i in range(3)]
         )
 
@@ -193,21 +193,21 @@ class TestConversionRecordsAreBulkLoadedOnce:
             ) as spy,
             patch("sn2md_worker.workflows.backfill.DBOS.enqueue_workflow"),
         ):
-            backfill_impl(drive=drive, settings=settings)
+            backfill_impl(source=source, settings=settings)
 
         # THEN — one bulk load, not N per-file lookups
         assert spy.call_count == 1
 
 
 class TestWhenSourceFolderIsNotConfigured:
-    def test_skips_gracefully(self, engine: Engine, drive: MagicMock) -> None:
+    def test_skips_gracefully(self, engine: Engine, source: MagicMock) -> None:
         # GIVEN — settings with an empty source_folder_id
         settings = Settings(drive=DriveConfig(source_folder_id=""))
 
         # WHEN
         with patch("sn2md_worker.workflows.backfill.DBOS.enqueue_workflow") as enqueue:
-            backfill_impl(drive=drive, settings=settings)
+            backfill_impl(source=source, settings=settings)
 
         # THEN — no Drive call, no enqueue
-        drive.list_all_notes.assert_not_called()
+        source.list_all_notes.assert_not_called()
         enqueue.assert_not_called()

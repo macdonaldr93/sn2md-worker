@@ -6,8 +6,9 @@ from dbos import DBOS
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.conversion.paths import UnsafePathError, logical_key
 from sn2md_worker.db import sql_session
-from sn2md_worker.drive.client import DriveClient, get_drive_client
+from sn2md_worker.drive.client import get_drive_client
 from sn2md_worker.logging import get_logger
+from sn2md_worker.sources.protocol import NoteSource
 from sn2md_worker.state import conversions
 from sn2md_worker.state.conversions import ConversionRecordView
 from sn2md_worker.state.models import ConversionStatus
@@ -21,14 +22,14 @@ _log = get_logger("sn2md_worker.workflows.backfill")
 
 @DBOS.workflow()
 def backfill() -> None:
-    backfill_impl(drive=get_drive_client(), settings=get_settings())
+    backfill_impl(source=get_drive_client(), settings=get_settings())
 
 
-def backfill_impl(*, drive: DriveClient, settings: Settings) -> None:
+def backfill_impl(*, source: NoteSource, settings: Settings) -> None:
     """Walk the source folder tree and enqueue conversions for anything stale.
 
     Loads every conversion record up front (single SELECT) instead of
-    hitting SQLite once per Drive file. Comfortable for a Supernote-sized
+    hitting SQLite once per source file. Comfortable for a Supernote-sized
     vault; if we ever grow into the tens of thousands of notes, switch
     to chunked-by-parent-folder loading.
     """
@@ -45,7 +46,7 @@ def backfill_impl(*, drive: DriveClient, settings: Settings) -> None:
             enqueued = 0
             skipped = 0
             unsafe = 0
-            for listed in drive.list_all_notes(settings.drive.source_folder_id):
+            for listed in source.list_all_notes(settings.drive.source_folder_id):
                 file = listed.metadata
                 source_path = listed.source_path
                 try:
