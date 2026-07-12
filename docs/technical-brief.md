@@ -66,9 +66,10 @@ sn2md-worker/
 ├── src/sn2md_worker/
 │   ├── __init__.py
 │   ├── __main__.py                 # `python -m sn2md_worker` entrypoint
-│   ├── app.py                      # FastAPI app factory + CorrelationIdMiddleware
+│   ├── app.py                      # FastAPI app factory + RequestIdMiddleware
 │   ├── clock.py                    # now_utc() wall-clock seam (tests monkeypatch it)
 │   ├── config.py                   # pydantic-settings, TOML + env, singleton
+│   ├── correlation.py              # new_correlation_id() for cross-enqueue log tracing
 │   ├── db.py                       # engine + SQLAlchemyDatasource singletons, sql_session()
 │   ├── logging.py                  # structlog + stdlib JSON setup, HealthProbeAccessFilter
 │   ├── observability.py            # /healthz /readyz /status
@@ -287,6 +288,9 @@ as `source=`. `poll_changes` and `renew_watch_channel` keep taking
 Drive infrastructure that would be deleted, not abstracted, if a local
 source ever replaced Drive. All impls follow the same log discipline:
 `_started`, `_succeeded` / `_failed` / `_skipped(reason=…)` — see §14.
+Every enqueued workflow also takes a trailing `correlation_id`
+argument for end-to-end log tracing (mechanics in §14); the signature
+snippets in this section show the core arguments and omit it.
 
 Queues (registered after `DBOS.launch()`, names in
 `workflows/queues.py`):
@@ -309,6 +313,12 @@ a no-op):
   `poll_changes("fallback")` onto `poll_queue` so it serializes behind
   any webhook-triggered poll instead of racing it on the shared cursor
   (see §5.2).
+- `backfill-sweep`: cron from `settings.drive.backfill_sweep_cron`
+  (default `0 5 * * *`, daily 05:00 UTC). Runs `scheduled_backfill`,
+  which enqueues `backfill` onto `poll_queue`: the safety net that
+  re-drives conversions that failed permanently (for example Gemini
+  throttle retries exhausted, §13) without waiting for a restart or a
+  new edit of the note.
 
 `convert_note` and `delete_output` both acquire a `filelock.FileLock`
 via `workflows/locks.lock_for`, keyed on a SHA-256 of `logical_key`
@@ -463,7 +473,9 @@ def convert_note(file_id: str, source_path: str) -> None:
 9. `run_multi_page(...)` — extracts PNGs (sorted numerically by the
    first int in each filename), hashes each page, and reuses prior
    page bodies hash-first (see §6): Gemini runs only for hashes never
-   transcribed before, via tenacity-wrapped retry. Writes
+   transcribed before, via tenacity-wrapped retry (3 fast attempts for
+   generic failures; 429-shaped throttle errors get 8 attempts with
+   backoff up to 120s so a quota window is ridden out in place). Writes
    `page-NN.md` + `page-NN.png` per page and an `index.md`, firing
    `on_page_done` after each page so the workflow upserts that page's
    `page_conversions` row immediately: a crash mid-note resumes
@@ -695,10 +707,14 @@ Handler:
    `expires_at` is in the past, return 200 and log (a stale channel).
 3. Verify `X-Goog-Channel-Token` matches persisted token via
    `hmac.compare_digest` (constant-time); else 200 + warn.
-4. Enqueue `poll_changes(trigger_source="webhook")` with
+4. Mint a `correlation_id` (`new_correlation_id()`, see §14) and
+   enqueue `poll_changes` with `trigger_source="webhook"` and
    `SetEnqueueOptions(deduplication_id=f"{channel_id}:{message_number}")`
    so Google's push retries (same message number) are dropped by DBOS
-   with `DBOSQueueDeduplicatedError`, which we absorb as 200.
+   with `DBOSQueueDeduplicatedError`, which we absorb as 200. The
+   handler's log events carry both the HTTP `request_id` (contextvars)
+   and the minted `correlation_id`, linking the request to the async
+   chain.
 
 Response codes: return 200 quickly; DBOS handles the actual work
 asynchronously. Google retries on 5xx with exponential backoff — we do
@@ -711,8 +727,9 @@ layout. Sections:
 
 - `[drive]` — `source_folder_id`, `fallback_poll_cron` (default
   `*/5 * * * *`; drives the `fallback-poll-changes` schedule, §5.2),
-  debounce timing knobs (currently unused; kept for the deferred
-  `debounce_file` workflow)
+  `backfill_sweep_cron` (default `0 5 * * *`; drives the
+  `backfill-sweep` schedule, §5), debounce timing knobs (currently
+  unused; kept for the deferred `debounce_file` workflow)
 - `[vault]` — `root_path`, `mirror_source_layout`
 - `[sn2md]` — `model` (default `gemini/gemini-2.5-pro`), `api_key`
   (SecretStr, optional), `prompt` (optional full-prompt override, §6;
@@ -873,7 +890,7 @@ LAN-only or behind reverse-proxy auth.
 | Container restart mid-conversion      | DBOS resumes workflow from last step                                                                                                                   |
 | Watch channel expires without renewal | Daily `renew_watch_channel` cron creates a fresh channel; cursor preserves continuity between old and new channel                                      |
 | Webhook URL changed (ngrok, DNS)      | `renew_watch_channel_impl` sees `webhook_url != settings.webhook.url` on next fire, calls `drive.stop_channel` on the old channel, creates a new one   |
-| Gemini failure / rate limit           | `convert_note_failed` recorded; DBOS marks workflow ERROR; next `backfill` retries (idempotent via `page_conversions` cache — completed pages skipped) |
+| Gemini failure / rate limit           | 429-shaped errors retry in place on an extended budget (8 attempts, backoff to 120s, §5.4); on exhaustion, workflow ERROR and the daily `backfill-sweep` re-drives it (completed pages skipped)        |
 | Malformed `.note`                     | sn2md raises; workflow terminates with ERROR; log + record status; do not retry                                                                        |
 | Drive quota / auth error              | Workflow raises; log; next scheduled or manual retry                                                                                                   |
 | SQLite locked / corrupted             | Container fails healthcheck; user restores from backup of `/data`                                                                                      |
@@ -976,9 +993,11 @@ uvicorn upgrade can't silently eat access logs.
 ### Correlation IDs
 
 Every log line inside a request or workflow scope carries context that
-makes cross-service tracing possible:
+makes end-to-end tracing possible. Two ids, per best practice:
+`request_id` is scoped to one HTTP request; `correlation_id` follows
+one logical operation across DBOS enqueue boundaries.
 
-- **HTTP requests** — `app.CorrelationIdMiddleware` binds `request_id`
+- **HTTP requests** — `app.RequestIdMiddleware` binds `request_id`
   (from an incoming `X-Request-Id` header, else a fresh 16-char uuid4
   hex), plus `method` and `path`, into structlog's contextvars for the
   duration of the request. The same id is echoed back in the response
@@ -986,19 +1005,35 @@ makes cross-service tracing possible:
   to end.
 - **Workflows** — each `<workflow>_impl` opens
   `structlog.contextvars.bound_contextvars(workflow=..., file_id=...,
-logical_key=..., trigger=...)`. Every log line inside the scope
-  auto-picks up those fields so individual call sites don't repeat
-  them.
+logical_key=..., trigger=..., correlation_id=...)`. Every log line
+  inside the scope auto-picks up those fields so individual call
+  sites don't repeat them.
 
 Correlation across the enqueue boundary (webhook → `poll_changes`
-worker → `convert_note` worker) is not automatic — those run on
-separate DBOS worker threads. Use `file_id` / `logical_key` for
-cross-workflow tracing today; a workflow-arg-based propagation of an
-originating `request_id` is a future addition.
+worker → `convert_note` worker) rides on `correlation_id`.
+`new_correlation_id()` in `correlation.py` mints one at each root
+trigger: a webhook notification received, a fallback-poll cron tick, a
+renewal run's catch-up poll, boot-time channel recovery (a single id
+shared by the recovery poll and the renewal it drives), and the
+startup backfill. Contextvars don't cross DBOS worker threads, but
+workflow arguments are persisted, so the id travels as an explicit
+trailing workflow argument (`poll_changes(trigger_source, correlation_id)`,
+`convert_note(file_id, source_path, correlation_id)`,
+`delete_output(file_id, correlation_id)`, `backfill(correlation_id)`),
+gets bound into each workflow's structlog context, and is inherited
+unchanged by every child enqueue: poll to convert / delete / backfill,
+backfill to convert, and delete's re-point follow-up convert. A
+workflow invoked without one (an in-flight replay from before this
+shipped) mints its own, so every workflow log line carries a
+`correlation_id`. The webhook's log events include both `request_id`
+(from contextvars) and the `correlation_id` it minted, linking the
+HTTP scope to the async chain. Workflow wrappers additionally bind
+`dbos_workflow_id` (from `DBOS.workflow_id`) so any log line also
+links back to DBOS's own workflow row for retry forensics.
 
 ## 15. Testing strategy
 
-**261 unit tests** (as of 2026-07-12), in-memory SQLite. All tests
+**285 unit tests** (as of 2026-07-12), in-memory SQLite. All tests
 live under `tests/unit/` mirroring the source layout (per-project
 convention).
 Two shapes:
@@ -1045,10 +1080,11 @@ Drive + Gemini is via `scripts/verify/`.
    wrapper; the shipped worker drives the per-page primitives
    instead, see §6. Both scripts stay useful as smoke tests if the
    setup ever needs re-verification.)
-5. **Webhook reachability from Google** — pending real-world deploy
-   (needs DNS + reverse proxy on Unraid). The webhook handler,
-   authentication, and enqueue path are all unit-tested; the missing
-   piece is confirming Google's POSTs actually reach the container.
+5. **Webhook reachability from Google** — ✅ Resolved 2026-07-12 in the
+   real deployment (production DNS + reverse proxy on Unraid).
+   Google's push POSTs reach the container. The webhook handler,
+   authentication, and enqueue path were already unit-tested; the live
+   deploy confirmed end-to-end delivery.
 
 ## 17. Milestones
 
@@ -1069,18 +1105,18 @@ Drive + Gemini is via `scripts/verify/`.
 
 Still outstanding as of 2026-07-12:
 
-- Correlation id propagation across the DBOS enqueue boundary
-  (webhook → poll_changes worker → convert_note worker). Today those
-  cross with `file_id` / `logical_key`, not with the originating
-  `request_id`.
-- Webhook reachability from Google in the real deployment (§16 item 5)
-  still needs the production DNS + reverse-proxy confirmation.
 - `debounce_file` stays deferred by choice (§5.3): schema + repo exist,
   the workflow doesn't, because Drive push appears to fire only on
   completed uploads.
 
 Done since this list was written:
 
+- Correlation id propagation across the DBOS enqueue boundary: shipped
+  2026-07-12. A `correlation_id` minted at the root trigger travels as
+  an explicit workflow argument through every child enqueue (§14).
+- Webhook reachability from Google: confirmed 2026-07-12 in the real
+  deployment (production DNS + reverse proxy on Unraid), resolving §16
+  item 5.
 - Multi-arch images published: `release.yml` builds both
   `sn2md-worker` and `obsidian-sync` for `linux/amd64` +
   `linux/arm64` on every push to main and semver tags (§10).
@@ -1111,6 +1147,17 @@ Done since this list was written:
   `convert_note` / `delete_output` / `backfill` depend on the protocol
   rather than on `DriveClient` (§5, §7).
 - Health-probe access-log suppression (2026-07-12): §14.
+- Correlation-id propagation (2026-07-12): `RequestIdMiddleware`
+  (renamed from `CorrelationIdMiddleware`) keeps `request_id`
+  HTTP-scoped; `correlation.py` mints a `correlation_id` at each root
+  trigger, passed as a trailing workflow argument across every
+  enqueue (§14).
+- Throttle-aware Gemini backoff (2026-07-12): 429-shaped failures ride
+  an extended in-place retry budget instead of failing the workflow
+  after three attempts (§5.4, §13).
+- Daily `backfill-sweep` schedule (2026-07-12): re-drives conversions
+  that failed permanently, bounding their staleness to one day (§5,
+  §13).
 
 ### Hardening shipped in the audit pass (2026-07-05)
 

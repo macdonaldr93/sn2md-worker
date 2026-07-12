@@ -92,7 +92,10 @@ Runs continuously as a Docker container on my Unraid server.
   `fileId` (see technical-brief §4a). The cache matches pages by
   content hash (rendered-PNG md5), not position, so inserting a page
   mid-note re-converts only the new page rather than cascading the
-  pages after it through Gemini (shipped 2026-07-05).
+  pages after it through Gemini (shipped 2026-07-05). Gemini
+  rate-limit windows are ridden out in place with extended backoff;
+  anything that still fails is re-driven by the daily backfill sweep
+  (both shipped 2026-07-12).
 - **Deletion handling**: if a `.note` is deleted from Drive, delete the
   corresponding Markdown + assets from the vault (mirror source). Delete
   workflow first confirms no live file with the same logical key still
@@ -145,8 +148,10 @@ Runs continuously as a Docker container on my Unraid server.
 - **Concurrency**: `DBOS.register_queue("convert", worker_concurrency=N)` —
   configurable, default 2.
 - **Scheduling**: `DBOS.create_schedule` used for the daily Drive
-  watch-channel renewal check and the fallback change poll (default
-  every 5 minutes).
+  watch-channel renewal check, the fallback change poll (default
+  every 5 minutes), and a daily backfill sweep that re-drives any
+  conversion that failed permanently (for example after a Gemini
+  rate-limit window outlasted its retries).
 
 ### Output layout
 
@@ -204,7 +209,10 @@ Runs continuously as a Docker container on my Unraid server.
 - **Logs**: structured JSON to stdout via `structlog`. Every workflow
   emits `_started` / `_succeeded` / `_failed` / `_skipped (reason=…)`
   events. Failures include a stringified exception plus the full
-  traceback under `exception`. Successful health-probe requests
+  traceback under `exception`. Log lines carry a `correlation_id`
+  minted at the original trigger (webhook push, scheduled poll,
+  startup), so one operation is traceable end to end from trigger to
+  vault write. Successful health-probe requests
   (`/healthz`, `/readyz`) are filtered out of the access log so
   container healthchecks don't flood it; failed probes and real
   traffic still appear.
@@ -213,7 +221,7 @@ Runs continuously as a Docker container on my Unraid server.
 
 ### Testing
 
-- **Unit tests** (`tests/unit/`): 261 tests as of 2026-07-12,
+- **Unit tests** (`tests/unit/`): 285 tests as of 2026-07-12,
   in-memory SQLite. BDD scenario classes for behavior (workflows,
   webhook, repos); plain
   functions for pure logic (path helpers, model alias mapping,
@@ -250,5 +258,7 @@ Runs continuously as a Docker container on my Unraid server.
    Worker creates a fresh channel on TTL headroom or URL change.
 5. **Live conversion** — verified via ngrok deploy: Supernote edit →
    Drive push → `poll_changes` → `convert_note` → `page-NN.md` in the
-   vault. Multi-arch images have been publishing to GHCR since
-   v0.1.0 (2026-07-05); v0.2.0 followed on 2026-07-11.
+   vault. Webhook reachability in the real deployment (production DNS
+   + reverse proxy on Unraid) confirmed 2026-07-12. Multi-arch images
+   have been publishing to GHCR since v0.1.0 (2026-07-05); v0.2.0
+   followed on 2026-07-11.
