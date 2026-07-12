@@ -35,8 +35,6 @@ model = "gemini/gemini-2.5-pro"
 
 [queue]
 convert_concurrency = 2
-convert_rate_limit_per_minute = 30
-debounce_concurrency = 8
 
 [observability]
 log_level = "INFO"
