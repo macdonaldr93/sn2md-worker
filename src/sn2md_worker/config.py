@@ -35,8 +35,6 @@ class Sn2mdConfig(BaseModel, frozen=True):
 
 class QueueConfig(BaseModel, frozen=True):
     convert_concurrency: int = Field(default=2, ge=1)
-    convert_rate_limit_per_minute: int = Field(default=30, ge=1)
-    debounce_concurrency: int = Field(default=8, ge=1)
 
 
 class ObservabilityConfig(BaseModel, frozen=True):
