@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 from tenacity import wait_none
 
-from sn2md_worker.conversion import multi_page
+from sn2md_worker.conversion import gemini, multi_page
 from sn2md_worker.conversion.multi_page import (
     DEFAULT_PROMPT,
     PageOutcome,
@@ -24,7 +24,7 @@ from sn2md_worker.conversion.multi_page import (
 @pytest.fixture
 def instant_gemini_retries(monkeypatch: pytest.MonkeyPatch) -> None:
     """Zero-out tenacity's backoff sleeps so retry tests run fast."""
-    monkeypatch.setattr(multi_page._call_gemini_with_retry.retry, "wait", wait_none())
+    monkeypatch.setattr(gemini._call_gemini_with_retry.retry, "wait", wait_none())
 
 
 NOW = datetime(2026, 7, 5, 12, 0, tzinfo=UTC)
@@ -165,7 +165,7 @@ class TestRunMultiPageOrdersPagesByNumericFilenamePart:
                 ),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
                 side_effect=["MD-1", "MD-2", "MD-10"],
             ) as fake_llm,
         ):
@@ -179,7 +179,7 @@ class TestRunMultiPageOrdersPagesByNumericFilenamePart:
             )
 
         # THEN — Gemini received the sources in numeric order (1 → 2 → 10)
-        source_order = [Path(call.args[0]).name for call in fake_llm.call_args_list]
+        source_order = [call.kwargs["png_path"].name for call in fake_llm.call_args_list]
         assert source_order == ["page-1.png", "page-2.png", "page-10.png"]
 
         # AND — the vault gets consecutive page-01/02/03 files (not with a gap
@@ -204,7 +204,7 @@ class TestRunMultiPageFreshConversion:
                 _fake_extract_factory({"p1.png": b"png-1-content", "p2.png": b"png-2-content"}),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
                 side_effect=["md for page 1", "md for page 2"],
             ) as fake_llm,
         ):
@@ -255,7 +255,7 @@ class TestRunMultiPageWithCachedPages:
                 _fake_extract_factory({"p1.png": b"page-1-bytes", "p2.png": b"page-2-bytes"}),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
                 side_effect=["md for page 2"],
             ) as fake_llm,
         ):
@@ -298,7 +298,7 @@ class TestRunMultiPageWhenCacheHashMatchesButPageMdIsMissing:
                 _fake_extract_factory({"p1.png": b"page-1-bytes"}),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
                 return_value="regenerated markdown",
             ) as fake_llm,
         ):
@@ -332,7 +332,7 @@ class TestRunMultiPageWhenExtractReturnsZeroPages:
                 _fake_extract_factory({}),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
             ) as fake_llm,
         ):
             result = run_multi_page(
@@ -355,21 +355,18 @@ class TestRunMultiPageWhenExtractReturnsZeroPages:
 
 class TestRunMultiPageWhenGeminiFailsMidWay:
     def test_leaves_earlier_pages_on_disk_and_raises_for_the_failing_one(
-        self,
-        tmp_path: Path,
-        instant_gemini_retries: None,  # noqa: ARG002
+        self, tmp_path: Path
     ) -> None:
-        # GIVEN — three pages, Gemini fails permanently on page 2 (after tenacity retries)
+        # GIVEN — three pages; transcription fails on page 2 (as it would
+        # after gemini.transcribe_page exhausted its retry budget).
         note_path = tmp_path / "note.note"
         note_path.write_bytes(b"note-bytes")
         output_dir = tmp_path / "vault" / "note"
 
-        def flaky(*args: object, **kwargs: object) -> str:
-            # Second call fails; the retry decorator burns 3 attempts on it.
-            source = str(args[0])
-            if "p2.png" in source:
+        def flaky(*, png_path: Path, **_kwargs: object) -> str:
+            if png_path.name == "p2.png":
                 raise RuntimeError("gemini down for page 2")
-            return f"md for {Path(source).name}"
+            return f"md for {png_path.name}"
 
         with (
             patch(
@@ -383,7 +380,7 @@ class TestRunMultiPageWhenGeminiFailsMidWay:
                 ),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
                 side_effect=flaky,
             ),
             pytest.raises(Sn2mdRunError, match="page 2"),
@@ -422,7 +419,7 @@ class TestRunMultiPageHonorsCustomPrompt:
                 _fake_extract_factory({"p1.png": b"page-1-bytes"}),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
                 return_value="md",
             ) as fake_llm,
         ):
@@ -436,12 +433,16 @@ class TestRunMultiPageHonorsCustomPrompt:
                 prompt=custom_prompt,
             )
 
-        # THEN — the custom prompt was passed through as the last positional arg
-        # to image_to_markdown(path, context, api_key, model, prompt).
-        assert fake_llm.call_args.args[4] == custom_prompt
+        # THEN: the custom prompt was passed through as the
+        # prompt_template kwarg to transcribe_page.
+        assert fake_llm.call_args.kwargs["prompt_template"] == custom_prompt
 
 
 class TestRunMultiPageWhenGeminiFailsTransientlyThenSucceeds:
+    """Integration-flavored: drives the real gemini.transcribe_page retry
+    loop through run_multi_page, stubbing only the underlying SDK call.
+    Detailed retry-budget assertions live in test_gemini.py."""
+
     def test_retries_and_writes_the_markdown_from_the_successful_attempt(
         self,
         tmp_path: Path,
@@ -466,7 +467,7 @@ class TestRunMultiPageWhenGeminiFailsTransientlyThenSucceeds:
                 _fake_extract_factory({"p1.png": b"page-1-bytes"}),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.gemini.image_to_markdown",
                 side_effect=flaky,
             ) as fake_llm,
         ):
@@ -487,12 +488,9 @@ class TestRunMultiPageWhenGeminiFailsTransientlyThenSucceeds:
 
 
 class TestRunMultiPageWhenGeminiKeepsFailing:
-    def test_gives_up_after_max_attempts_and_preserves_type_info(
-        self,
-        tmp_path: Path,
-        instant_gemini_retries: None,  # noqa: ARG002
-    ) -> None:
-        # GIVEN
+    def test_wraps_the_exhausted_error_and_preserves_type_info(self, tmp_path: Path) -> None:
+        # GIVEN: transcribe_page raises after burning its retry budget
+        # (budget details are test_gemini.py's concern).
         note_path = tmp_path / "note.note"
         note_path.write_bytes(b"note-bytes")
         output_dir = tmp_path / "vault" / "note"
@@ -503,9 +501,11 @@ class TestRunMultiPageWhenGeminiKeepsFailing:
                 _fake_extract_factory({"p1.png": b"page-1-bytes"}),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
                 side_effect=ConnectionError("gemini down"),
-            ) as fake_llm,
+            ),
+            # THEN: wrapped as Sn2mdRunError with the original type name
+            # preserved so structured logs can tell failure classes apart.
             pytest.raises(Sn2mdRunError, match="ConnectionError"),
         ):
             # WHEN
@@ -517,9 +517,6 @@ class TestRunMultiPageWhenGeminiKeepsFailing:
                 existing_pages={},
                 now=NOW,
             )
-
-        # THEN — three attempts (initial + 2 retries), then wrapped
-        assert fake_llm.call_count == 3
 
 
 class TestRunMultiPageWhenAPageIsInsertedMidNote:
@@ -556,7 +553,7 @@ class TestRunMultiPageWhenAPageIsInsertedMidNote:
                 ),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
                 side_effect=["body NEW"],
             ) as fake_llm,
         ):
@@ -600,7 +597,7 @@ class TestRunMultiPageInvokesOnPageDone:
                 _fake_extract_factory({"p1.png": b"page-1-bytes", "p2.png": b"page-2-bytes"}),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
                 side_effect=["md 1", "md 2"],
             ),
         ):
@@ -619,20 +616,15 @@ class TestRunMultiPageInvokesOnPageDone:
         assert [p.page_index for p in received] == [0, 1]
         assert [p.output_rel_path for p in received] == ["page-01.md", "page-02.md"]
 
-    def test_callback_not_invoked_for_pages_that_fail_gemini(
-        self,
-        tmp_path: Path,
-        instant_gemini_retries: None,  # noqa: ARG002
-    ) -> None:
+    def test_callback_not_invoked_for_pages_that_fail_gemini(self, tmp_path: Path) -> None:
         # GIVEN — page 2 fails, page 1 succeeds.
         note_path = tmp_path / "note.note"
         note_path.write_bytes(b"note-bytes")
         output_dir = tmp_path / "vault" / "note"
         received: list[PageOutcome] = []
 
-        def flaky(*args: object, **_kwargs: object) -> str:
-            source = str(args[0])
-            if "p2.png" in source:
+        def flaky(*, png_path: Path, **_kwargs: object) -> str:
+            if png_path.name == "p2.png":
                 raise RuntimeError("gemini down")
             return "md 1"
 
@@ -642,7 +634,7 @@ class TestRunMultiPageInvokesOnPageDone:
                 _fake_extract_factory({"p1.png": b"png-1", "p2.png": b"png-2"}),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
                 side_effect=flaky,
             ),
             pytest.raises(Sn2mdRunError),
@@ -694,7 +686,7 @@ class TestRunMultiPageWhenSeveralPriorPagesShareTheSameHash:
                 ),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
                 side_effect=["fresh content"],
             ) as fake_llm,
         ):
@@ -742,7 +734,7 @@ class TestRunMultiPageRecoversAnOrphanMdWhenDbLostItsRow:
                 _fake_extract_factory({"p1.png": b"page-1-bytes"}),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
             ) as fake_llm,
         ):
             result = run_multi_page(
@@ -783,7 +775,7 @@ class TestRunMultiPageDoesNotRecoverOrphansWithoutASiblingPng:
                 _fake_extract_factory({"p1.png": b"page-1-bytes"}),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
                 return_value="fresh gemini output",
             ) as fake_llm,
         ):
@@ -833,7 +825,7 @@ class TestFallsBackToDefaultPromptWhenNoneSupplied:
                 _fake_extract_factory({"p1.png": b"page-1-bytes"}),
             ),
             patch(
-                "sn2md_worker.conversion.multi_page.image_to_markdown",
+                "sn2md_worker.conversion.multi_page.transcribe_page",
                 return_value="md",
             ) as fake_llm,
         ):
@@ -847,4 +839,4 @@ class TestFallsBackToDefaultPromptWhenNoneSupplied:
                 # prompt omitted → DEFAULT_PROMPT
             )
 
-        assert fake_llm.call_args.args[4] == DEFAULT_PROMPT
+        assert fake_llm.call_args.kwargs["prompt_template"] == DEFAULT_PROMPT

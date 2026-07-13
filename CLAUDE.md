@@ -87,7 +87,8 @@ a Docker container on Unraid.
      renew_watch stay on the Drive-specific types (that machinery is
      Drive infrastructure). Permanent means log-skip; transient
      propagates so DBOS retries the workflow. Gemini retries via
-     tenacity in `conversion/multi_page.py`.
+     tenacity in `conversion/gemini.py` (fast budget for generic
+     failures, extended budget for 429-shaped throttle errors).
    - **View dataclasses**: state repo getters return frozen
      `<Entity>View` dataclasses, not ORM instances. Callers can hold
      them past session close without `DetachedInstanceError`.
@@ -114,7 +115,8 @@ src/sn2md_worker/
 │                       ingestion seam workflows depend on
 ├── drive/              DriveClient (implements NoteSource; retry-wrapped
 │                       via tenacity), models, path resolver, webhook route
-├── conversion/         paths + per-page runner (multi_page.py)
+├── conversion/         paths + per-page runner (multi_page.py) +
+│                       throttle-aware Gemini call (gemini.py)
 ├── state/              SQLAlchemy models + per-table repos returning
 │                       frozen `*View` dataclasses (detached-instance safe)
 └── workflows/          DBOS workflows (see nested CLAUDE.md);

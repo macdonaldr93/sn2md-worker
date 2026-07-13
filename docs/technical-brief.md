@@ -86,6 +86,7 @@ sn2md-worker/
 │   │   └── webhook.py              # /webhooks/drive route + token verify
 │   ├── conversion/
 │   │   ├── __init__.py
+│   │   ├── gemini.py               # one page PNG to markdown via Gemini, throttle-aware retry
 │   │   ├── multi_page.py           # per-page runner: extract, hash-first cache, Gemini
 │   │   └── paths.py                # logical_key / note_output_dir / output_rel_path
 │   ├── state/

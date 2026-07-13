@@ -19,17 +19,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from sn2md.ai_utils import image_to_markdown
 from sn2md.importers.note import NotebookExtractor
 from sn2md.types import TO_MARKDOWN_TEMPLATE
-from tenacity import (
-    RetryCallState,
-    retry,
-    stop_after_attempt,
-    wait_exponential_jitter,
-)
 
-from sn2md_worker.logging import get_logger
+from sn2md_worker.conversion.gemini import transcribe_page
 
 __all__ = [
     "DEFAULT_PROMPT",
@@ -41,18 +34,6 @@ __all__ = [
     "page_index_from_filename",
     "run_multi_page",
 ]
-
-_log = get_logger("sn2md_worker.conversion.multi_page")
-
-# Retry budget: 3 attempts with exponential backoff + jitter, bounded
-# well under a minute in the worst case. Retries any Exception because
-# sn2md wraps underlying-SDK errors (llm-gemini / google-generativeai /
-# grpc) with no stable public type surface; the tri-attempt cap covers
-# transient 429/5xx without pretending we can enumerate every permanent
-# failure mode.
-_GEMINI_MAX_ATTEMPTS = 3
-_GEMINI_BACKOFF_INITIAL_SECONDS = 2
-_GEMINI_BACKOFF_MAX_SECONDS = 20
 
 # We take sn2md's `TO_MARKDOWN_TEMPLATE` as our base — same {context}
 # placeholder, same core rules — and layer on stricter guidance so
@@ -137,7 +118,7 @@ def run_multi_page(
             else:
                 context = _tail(previous_markdown)
                 try:
-                    body = _call_gemini_with_retry(
+                    body = transcribe_page(
                         png_path=png_path,
                         context=context,
                         api_key=api_key,
@@ -275,45 +256,6 @@ def _read_body_at(output_dir: Path, page_index: int) -> str | None:
     except OSError:
         return None
     return _extract_cached_body(rendered)
-
-
-def _log_gemini_retry(retry_state: RetryCallState) -> None:
-    """tenacity `before_sleep` hook — one structured warning per backoff."""
-    exc = retry_state.outcome.exception() if retry_state.outcome is not None else None
-    next_wait = retry_state.next_action.sleep if retry_state.next_action is not None else 0
-    _log.warning(
-        "gemini_call_retry_scheduled",
-        attempt=retry_state.attempt_number,
-        max_attempts=_GEMINI_MAX_ATTEMPTS,
-        next_wait_seconds=round(next_wait, 2),
-        error_type=type(exc).__name__ if exc is not None else None,
-        error=str(exc) if exc is not None else None,
-    )
-
-
-@retry(
-    stop=stop_after_attempt(_GEMINI_MAX_ATTEMPTS),
-    wait=wait_exponential_jitter(
-        initial=_GEMINI_BACKOFF_INITIAL_SECONDS, max=_GEMINI_BACKOFF_MAX_SECONDS
-    ),
-    before_sleep=_log_gemini_retry,
-    reraise=True,
-)
-def _call_gemini_with_retry(
-    *,
-    png_path: Path,
-    context: str,
-    api_key: str,
-    model: str,
-    prompt_template: str,
-) -> str:
-    """Invoke sn2md's Gemini call with bounded exponential-backoff retry.
-
-    Idempotent by construction — no side effects until the caller writes
-    the returned markdown to disk — so retrying is always safe.
-    """
-    result: str = image_to_markdown(str(png_path), context, api_key, model, prompt_template)
-    return result
 
 
 def _asset_filename(page_index: int) -> str:
