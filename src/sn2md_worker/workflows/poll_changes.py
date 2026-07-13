@@ -96,7 +96,6 @@ def poll_changes_impl(
             ignored = 0
             errored = 0
 
-            # Cache metadata lookups for the duration of this poll run.
             # `resolve_source_path` walks a file's parent chain; sibling
             # changes on the same page usually share several ancestors, so
             # one cache pays for the whole walk. Fresh per run so a rename

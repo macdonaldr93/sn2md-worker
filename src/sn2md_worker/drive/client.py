@@ -63,11 +63,11 @@ _DRIVE_MAX_ATTEMPTS = 3
 _DRIVE_BACKOFF_INITIAL_SECONDS = 2
 _DRIVE_BACKOFF_MAX_SECONDS = 20
 
-# 4 MB chunks — big enough that a typical Supernote `.note` (single-digit
-# MB) downloads in one round trip, small enough that we never buffer a
-# runaway file in memory. `MediaIoBaseDownload` requests each chunk via
-# HTTP Range so the process memory ceiling is one chunksize regardless of
-# the file's total size — the whole point of switching off `.execute()`.
+# 4 MB chunks: big enough that a typical Supernote `.note` (single-digit
+# MB) downloads in one round trip, small enough that a runaway file is
+# never buffered whole. `MediaIoBaseDownload` requests each chunk via
+# HTTP Range, so the process memory ceiling is one chunksize regardless
+# of the file's total size.
 _DOWNLOAD_CHUNK_SIZE = 4 * 1024 * 1024
 
 DEFAULT_FILE_FIELDS = "id,name,md5Checksum,size,parents,mimeType,trashed,modifiedTime"
@@ -86,8 +86,8 @@ class DriveClientError(SourceError):
     Callers that need to react differently to permanent vs. transient
     failures (`poll_changes` uses this to decide whether to raise or
     log-skip) should catch `DrivePermanentError` or `DriveTransientError`
-    specifically. Legacy raises of the plain base class are still used
-    for schema/response-shape errors that aren't Drive HTTP failures.
+    specifically. The plain base class is raised for schema/response-shape
+    errors that aren't Drive HTTP failures.
     """
 
 
@@ -113,10 +113,9 @@ class DriveTransientError(DriveClientError, SourceTransientError):
 def _drive_error_from_http(exc: HttpError) -> DriveClientError:
     """Wrap an HttpError as `Permanent` or `Transient` based on status.
 
-    4xx (except 429, which was retried and exhausted → transient by that
-    point) are permanent; the resource is gone or the request was
-    malformed and re-trying doesn't help. Everything else — no status,
-    5xx after retries — is transient and expected to clear.
+    Plain 4xx are permanent (gone/rejected; retrying doesn't help). 429
+    reaches here only after the retry budget is exhausted, so it stays
+    transient, as do 5xx and status-less errors.
     """
     status = getattr(getattr(exc, "resp", None), "status", None)
     if (
@@ -262,10 +261,7 @@ class DriveClient:
         """Download a Drive file's content to `dest_dir/name`. Returns the path.
 
         Streams the file via `MediaIoBaseDownload` in fixed-size chunks so
-        the process memory ceiling is one chunk regardless of file size;
-        the previous `.execute()` path returned the full body as bytes and
-        could OOM (or silently truncate) on large notes.
-
+        the process memory ceiling is one chunk regardless of file size.
         Transient failures (429, 5xx, network) are retried at the whole-
         download level; on retry the file is truncated and re-fetched
         from byte 0.

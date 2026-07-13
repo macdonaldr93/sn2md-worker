@@ -99,16 +99,14 @@ def renew_watch_channel_impl(
 
             _create_and_activate(drive=drive, settings=settings, now=now, trigger=trigger_source)
             if active is not None:
-                # We just replaced an existing channel. Enqueue a catch-up
-                # poll to cover the seam between the old channel's last
-                # delivered push and the new channel becoming active.
-                # First-ever channel creation (active is None) needs no
-                # catch-up: the startup backfill covers the initial state.
-                # At boot with an already-expired channel,
-                # ensure_active_channel also enqueues a "recovery" poll, so
-                # this path can enqueue a second poll then - harmless, since
-                # poll_queue runs at concurrency 1 and the follow-up poll is
-                # a cheap no-op once the cursor has advanced.
+                # Replaced an existing channel: enqueue a catch-up poll to
+                # cover the seam between the old channel's last delivered
+                # push and the new one going active. First-ever creation
+                # (active is None) needs none: startup backfill covers it.
+                # At boot with an expired channel this can double up with
+                # ensure_active_channel's "recovery" poll - harmless, since
+                # poll_queue runs at concurrency 1 and the follow-up poll
+                # is a cheap no-op once the cursor has advanced.
                 DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, "renewal", correlation_id)
             _log.info("renew_watch_succeeded")
         except Exception as exc:
@@ -201,11 +199,8 @@ def _create_and_activate(
             session,
             NewWatchChannel(
                 channel_id=channel_id,
-                # Placeholders — `confirm` overwrites both once Drive replies.
-                # A row in this state is "pending": auth-usable but not yet
-                # promoted via `mark_active`. `expires_at` matches Drive's
-                # default 7-day TTL so webhook auth accepts pushes during
-                # the phase-1→phase-2 window.
+                # Placeholders; `confirm` overwrites both once Drive replies
+                # (see the docstring for the phase-1 window reasoning).
                 resource_id="",
                 token=token,
                 webhook_url=settings.webhook.url,

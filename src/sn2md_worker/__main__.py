@@ -38,9 +38,8 @@ def main() -> int:
     app = create_app()
 
     dbos_config = _dbos_config(settings)
-    # `render_as_string(hide_password=True)` replaces any embedded userinfo
-    # password with `***`. Today the URL is `sqlite:////data/…` with no
-    # secrets in it, but that changes the day someone points at Postgres.
+    # `hide_password=True` masks any embedded userinfo password; moot for
+    # today's sqlite URL, load-bearing the day someone points at Postgres.
     log.info(
         "dbos_init",
         database_url=make_url(settings.database.url).render_as_string(hide_password=True),
@@ -205,9 +204,8 @@ def _try_init_drive_client(settings: Settings) -> BootStepResult:
 def _prepare_sqlite_dir(database_url: str) -> None:
     """Ensure the parent directory of a SQLite database file exists.
 
-    Uses `make_url` so `sqlite+pysqlite://` and any other SQLAlchemy
-    variant parse cleanly instead of string-slicing on `sqlite://`.
-    `:memory:` and non-SQLite URLs are no-ops.
+    Uses `make_url` so `sqlite+pysqlite://` and other SQLAlchemy variants
+    parse cleanly. `:memory:` and non-SQLite URLs are no-ops.
     """
     parsed = make_url(database_url)
     if not parsed.drivername.startswith("sqlite"):
