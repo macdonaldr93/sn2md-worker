@@ -531,3 +531,90 @@ class TestListAllNotesWhenSubfolderRaisesPermanentError:
         # WHEN / THEN
         with pytest.raises(DrivePermanentError):
             list(drive.list_all_notes("missing-root"))
+
+
+class TestStopChannelRetryAndErrorWrapping:
+    def test_retries_transient_500_and_succeeds(self, instant_drive_retries: None) -> None:  # noqa: ARG002
+        # GIVEN — channels().stop().execute() fails once with 500 then succeeds
+        attempts = {"n": 0}
+
+        def execute() -> str:
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise _http_error(500)
+            return ""
+
+        stop_call = MagicMock()
+        stop_call.execute = execute
+        channels_mock = MagicMock()
+        channels_mock.stop.return_value = stop_call
+        service = MagicMock()
+        service.channels.return_value = channels_mock
+        drive = _drive_client_with_service(service)
+
+        # WHEN
+        drive.stop_channel("chan-1", "res-1")
+
+        # THEN
+        assert attempts["n"] == 2
+
+    def test_swallows_404_without_retrying(self, instant_drive_retries: None) -> None:  # noqa: ARG002
+        # GIVEN — channel already expired / stopped (HTTP 404)
+        attempts = {"n": 0}
+
+        def execute() -> str:
+            attempts["n"] += 1
+            raise _http_error(404)
+
+        stop_call = MagicMock()
+        stop_call.execute = execute
+        channels_mock = MagicMock()
+        channels_mock.stop.return_value = stop_call
+        service = MagicMock()
+        service.channels.return_value = channels_mock
+        drive = _drive_client_with_service(service)
+
+        # WHEN
+        drive.stop_channel("chan-1", "res-1")
+
+        # THEN — 404 is treated as idempotent success without retry
+        assert attempts["n"] == 1
+
+    def test_wraps_exhausted_network_error_in_drive_transient_error(
+        self, instant_drive_retries: None
+    ) -> None:  # noqa: ARG002
+        # GIVEN — socket timeout on every attempt
+        attempts = {"n": 0}
+
+        def execute() -> str:
+            attempts["n"] += 1
+            raise TimeoutError("socket timed out")
+
+        stop_call = MagicMock()
+        stop_call.execute = execute
+        channels_mock = MagicMock()
+        channels_mock.stop.return_value = stop_call
+        service = MagicMock()
+        service.channels.return_value = channels_mock
+        drive = _drive_client_with_service(service)
+
+        # WHEN / THEN
+        with pytest.raises(DriveTransientError, match="TimeoutError"):
+            drive.stop_channel("chan-1", "res-1")
+        assert attempts["n"] == 3
+
+    def test_wraps_google_auth_error_in_drive_transient_error(
+        self, instant_drive_retries: None
+    ) -> None:  # noqa: ARG002
+        # GIVEN — token refresh fails during stop_channel
+        stop_call = MagicMock()
+        stop_call.execute.side_effect = RefreshError("token refresh failed")
+        channels_mock = MagicMock()
+        channels_mock.stop.return_value = stop_call
+        service = MagicMock()
+        service.channels.return_value = channels_mock
+        drive = _drive_client_with_service(service)
+
+        # WHEN / THEN
+        with pytest.raises(DriveTransientError, match="RefreshError"):
+            drive.stop_channel("chan-1", "res-1")
