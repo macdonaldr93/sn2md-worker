@@ -16,6 +16,7 @@ __all__ = [
     "get_by_current_file_id",
     "get_by_logical_key",
     "list_all_by_key",
+    "list_by_current_file_id",
     "list_recent_by_status",
     "mark_success",
     "record_failure",
@@ -194,8 +195,13 @@ def get_by_logical_key(session: Session, logical_key: str) -> ConversionRecordVi
 
 def get_by_current_file_id(session: Session, file_id: str) -> ConversionRecordView | None:
     stmt = select(ConversionRecord).where(ConversionRecord.current_file_id == file_id)
-    record = session.execute(stmt).scalar_one_or_none()
+    record = session.execute(stmt).scalars().first()
     return _to_view(record) if record is not None else None
+
+
+def list_by_current_file_id(session: Session, file_id: str) -> list[ConversionRecordView]:
+    stmt = select(ConversionRecord).where(ConversionRecord.current_file_id == file_id)
+    return [_to_view(row) for row in session.execute(stmt).scalars()]
 
 
 def list_all_by_key(session: Session) -> dict[str, ConversionRecordView]:

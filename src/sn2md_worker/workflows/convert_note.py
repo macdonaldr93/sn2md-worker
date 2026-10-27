@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -132,10 +133,12 @@ def convert_note_impl(
 
                 _persist_finalize(
                     key=key,
+                    file_id=file_id,
                     result=result,
                     now=now,
                     source_md5=meta.md5_checksum,
                     output_dir=output_dir,
+                    vault_root=settings.vault.root_path,
                     note_basename=Path(meta.name).stem,
                 )
 
@@ -247,10 +250,12 @@ def _persist_page(*, key: str, page: PageOutcome, when: datetime) -> None:
 def _persist_finalize(
     *,
     key: str,
+    file_id: str,
     result: MultiPageResult,
     now: datetime,
     source_md5: str | None,
     output_dir: Path,
+    vault_root: Path,
     note_basename: str,
 ) -> None:
     with sql_session() as session, session.begin():
@@ -259,11 +264,37 @@ def _persist_finalize(
         page_conversions.delete_pages_at_or_beyond(
             session, logical_key=key, page_index=len(result.pages)
         )
+        stale_records = [
+            record
+            for record in conversions.list_by_current_file_id(session, file_id)
+            if record.logical_key != key
+        ]
+        for stale in stale_records:
+            if _delete_stale_vault_dir(stale.output_rel_path, vault_root):
+                conversions.delete_by_logical_key(session, stale.logical_key)
+                page_conversions.delete_all_for_note(session, stale.logical_key)
     _cleanup_stale_pages(
         note_output_dir=output_dir,
         current_page_count=len(result.pages),
         note_basename=note_basename,
     )
+
+
+def _delete_stale_vault_dir(output_rel_path_value: str, vault_root: Path) -> bool:
+    normalized = output_rel_path_value.strip()
+    if not normalized:
+        return False
+    target = (vault_root / normalized).resolve()
+    root = vault_root.resolve()
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return False
+    if target == root:
+        return False
+    if target.exists():
+        shutil.rmtree(target)
+    return True
 
 
 def _cleanup_stale_pages(

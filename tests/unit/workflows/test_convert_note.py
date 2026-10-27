@@ -627,3 +627,41 @@ class TestWhenSourceRaisesPermanentError:
         fake_run.assert_not_called()
         with Session(engine) as session:
             assert conversions.get_by_logical_key(session, "Notebooks/2026-07.note") is None
+
+
+class TestWhenNoteIsRenamedOrMovedInDrive:
+    def test_removes_old_vault_folder_and_old_db_rows_for_same_file_id(
+        self, engine: Engine, settings: Settings, source: MagicMock, tmp_path: Path
+    ) -> None:
+        # GIVEN — file-1 was previously converted at "Notebooks/2026-07.note"
+        _seed_conversion(engine, file_id="file-1", md5="abc123")
+        _seed_page(engine, page_index=0, page_md5="md5-p0")
+        old_dir = tmp_path / "vault" / "Notebooks" / "2026-07"
+        old_dir.mkdir(parents=True)
+        (old_dir / "page-01.md").write_text("old note")
+
+        source.get_metadata.return_value = _file_metadata(
+            id="file-1", name="2026-08.note", md5Checksum="abc123"
+        )
+        _stub_download(source)
+
+        # WHEN — the same file_id is converted at its new source_path
+        with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
+            fake_run.side_effect = _run_stub(pages=1)
+            convert_note_impl(
+                file_id="file-1",
+                source_path="Archive/2026-08.note",
+                source=source,
+                settings=settings,
+            )
+
+        # THEN — old vault directory and old DB records are removed, new ones exist
+        assert not old_dir.exists()
+        with Session(engine) as session:
+            assert conversions.get_by_logical_key(session, "Notebooks/2026-07.note") is None
+            assert page_conversions.list_for_note(session, "Notebooks/2026-07.note") == []
+            new_record = conversions.get_by_logical_key(session, "Archive/2026-08.note")
+            new_pages = page_conversions.list_for_note(session, "Archive/2026-08.note")
+        assert new_record is not None
+        assert new_record.last_status == ConversionStatus.SUCCESS
+        assert len(new_pages) == 1
