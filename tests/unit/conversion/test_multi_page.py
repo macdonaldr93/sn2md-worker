@@ -251,6 +251,41 @@ class TestRunMultiPageFreshConversion:
         assert "[[page-01]]" in index_body
         assert "[[page-02]]" in index_body
 
+    def test_passes_only_previous_page_body_as_context_without_frontmatter_or_image_link(
+        self, tmp_path: Path
+    ) -> None:
+        # GIVEN — a two-page note where page 1 has a short body
+        note_path = tmp_path / "note.note"
+        note_path.write_bytes(b"note-bytes")
+        output_dir = tmp_path / "vault" / "note"
+
+        with (
+            patch(
+                "sn2md_worker.conversion.multi_page.NotebookExtractor.extract_images",
+                _fake_extract_factory({"p1.png": b"png-1", "p2.png": b"png-2"}),
+            ),
+            patch(
+                "sn2md_worker.conversion.multi_page.transcribe_page",
+                side_effect=["short body on page 1", "body on page 2"],
+            ) as fake_llm,
+        ):
+            # WHEN
+            run_multi_page(
+                note_path=note_path,
+                output_dir=output_dir,
+                model="fake-model",
+                api_key="fake-key",
+                existing_pages={},
+                now=NOW,
+            )
+
+        # THEN — page 2's context is strictly page 1's transcribed body,
+        # without YAML frontmatter or the trailing ![Page 1](page-01.png) link
+        page2_context = fake_llm.call_args_list[1].kwargs["context"]
+        assert page2_context == "short body on page 1"
+        assert "---" not in page2_context
+        assert "![Page 1]" not in page2_context
+
 
 class TestRunMultiPageWithCachedPages:
     def test_skips_gemini_for_pages_whose_hash_matches(self, tmp_path: Path) -> None:
