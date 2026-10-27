@@ -4,7 +4,8 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 import structlog
-from dbos import DBOS
+from dbos import DBOS, SetEnqueueOptions
+from dbos._error import DBOSQueueDeduplicatedError
 
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.correlation import new_correlation_id
@@ -194,28 +195,18 @@ def _dispatch(
     correlation_id: str,
 ) -> bool:
     """Enqueue convert_note (or delete_output) for eligible changes."""
-    if change.removed:
+    if change.removed or (change.file is not None and change.file.trashed):
+        reason = "removed" if change.removed else "trashed"
         DBOS.enqueue_workflow(DELETE_QUEUE_NAME, delete_output, change.file_id, correlation_id)
         _log.info(
             "poll_changes_enqueued",
             file_id=change.file_id,
             target="delete_output",
-            reason="removed",
+            reason=reason,
         )
         return True
 
-    if change.file is None:
-        return False
-    if change.file.trashed:
-        DBOS.enqueue_workflow(DELETE_QUEUE_NAME, delete_output, change.file_id, correlation_id)
-        _log.info(
-            "poll_changes_enqueued",
-            file_id=change.file_id,
-            target="delete_output",
-            reason="trashed",
-        )
-        return True
-    if not change.file.name.lower().endswith(_NOTE_EXTENSION):
+    if change.file is None or not change.file.name.lower().endswith(_NOTE_EXTENSION):
         return False
 
     source_path = resolve_source_path(
@@ -226,9 +217,18 @@ def _dispatch(
     if source_path is None:
         return False
 
-    DBOS.enqueue_workflow(
-        CONVERT_QUEUE_NAME, convert_note, change.file_id, source_path, correlation_id
-    )
+    try:
+        with SetEnqueueOptions(deduplication_id=f"{change.file_id}:{source_path}"):
+            DBOS.enqueue_workflow(
+                CONVERT_QUEUE_NAME, convert_note, change.file_id, source_path, correlation_id
+            )
+    except DBOSQueueDeduplicatedError:
+        _log.info(
+            "poll_changes_convert_deduplicated",
+            file_id=change.file_id,
+            source_path=source_path,
+        )
+        return False
     _log.info(
         "poll_changes_enqueued",
         file_id=change.file_id,

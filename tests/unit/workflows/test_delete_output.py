@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from dbos._context import get_local_dbos_context
+from dbos._error import DBOSQueueDeduplicatedError
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
 
@@ -149,6 +151,33 @@ class TestWhenRepointRunsWithAnInheritedCorrelationId:
         # THEN - the repoint convert_note enqueue inherits the id
         enqueue.assert_called_once()
         assert enqueue.call_args.args[-1] == "corr-abc"
+
+    def test_repoint_sets_deduplication_id_and_ignores_duplicate_enqueue_error(
+        self, engine: Engine, settings: Settings, source: MagicMock, vault_root: Path
+    ) -> None:
+        # GIVEN — poll_changes already enqueued convert_note for file-new
+        _seed_record(engine, file_id="file-old", parent_folder_id="parent-1")
+        note_dir = _seed_output_dir(vault_root)
+        source.find_live_note.return_value = NoteMetadata(
+            id="file-new", name="2026-07.note", parents=("parent-1",)
+        )
+        observed_dedup_ids: list[str | None] = []
+
+        def fake_enqueue(*_args: object, **_kwargs: object) -> None:
+            ctx = get_local_dbos_context()
+            observed_dedup_ids.append(ctx.deduplication_id if ctx is not None else None)
+            raise DBOSQueueDeduplicatedError("wf-id", CONVERT_QUEUE_NAME, f"file-new:{LOGICAL_KEY}")
+
+        # WHEN
+        with patch(
+            "sn2md_worker.workflows.delete_output.DBOS.enqueue_workflow",
+            side_effect=fake_enqueue,
+        ):
+            delete_output_impl(file_id="file-old", source=source, settings=settings)
+
+        # THEN — deduplication_id was set and duplicate error did not fail delete_output
+        assert observed_dedup_ids == [f"file-new:{LOGICAL_KEY}"]
+        assert (note_dir / "2026-07.md").exists()
 
 
 class TestWhenNoLiveFileExistsAtSameLocation:

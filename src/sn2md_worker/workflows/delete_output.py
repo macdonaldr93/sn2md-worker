@@ -4,7 +4,8 @@ import shutil
 from pathlib import Path
 
 import structlog
-from dbos import DBOS
+from dbos import DBOS, SetEnqueueOptions
+from dbos._error import DBOSQueueDeduplicatedError
 
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.correlation import new_correlation_id
@@ -76,13 +77,23 @@ def delete_output_impl(
                         _repoint(logical_key=record.logical_key, new_file_id=live.id)
                         # Guards against a delete-side push without a
                         # matching create-side push.
-                        DBOS.enqueue_workflow(
-                            CONVERT_QUEUE_NAME,
-                            convert_note,
-                            live.id,
-                            record.source_path,
-                            correlation_id,
-                        )
+                        try:
+                            with SetEnqueueOptions(
+                                deduplication_id=f"{live.id}:{record.source_path}"
+                            ):
+                                DBOS.enqueue_workflow(
+                                    CONVERT_QUEUE_NAME,
+                                    convert_note,
+                                    live.id,
+                                    record.source_path,
+                                    correlation_id,
+                                )
+                        except DBOSQueueDeduplicatedError:
+                            _log.info(
+                                "delete_output_repoint_convert_deduplicated",
+                                new_file_id=live.id,
+                                logical_key=record.logical_key,
+                            )
                         _log.info(
                             "delete_output_skipped",
                             reason="repointed_to_new_file",

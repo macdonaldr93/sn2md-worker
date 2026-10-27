@@ -3,7 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 
 import structlog
-from dbos import DBOS
+from dbos import DBOS, SetEnqueueOptions
+from dbos._error import DBOSQueueDeduplicatedError
 
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.conversion.paths import UnsafePathError, logical_key
@@ -98,9 +99,23 @@ def backfill_impl(
                     continue
 
                 if _needs_conversion(existing.get(key), file.md5_checksum):
-                    DBOS.enqueue_workflow(
-                        CONVERT_QUEUE_NAME, convert_note, file.id, source_path, correlation_id
-                    )
+                    try:
+                        with SetEnqueueOptions(deduplication_id=f"{file.id}:{source_path}"):
+                            DBOS.enqueue_workflow(
+                                CONVERT_QUEUE_NAME,
+                                convert_note,
+                                file.id,
+                                source_path,
+                                correlation_id,
+                            )
+                    except DBOSQueueDeduplicatedError:
+                        _log.info(
+                            "backfill_convert_deduplicated",
+                            file_id=file.id,
+                            source_path=source_path,
+                        )
+                        skipped += 1
+                        continue
                     enqueued += 1
                 else:
                     skipped += 1

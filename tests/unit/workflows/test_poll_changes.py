@@ -6,6 +6,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from dbos._context import get_local_dbos_context
+from dbos._error import DBOSQueueDeduplicatedError
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
 
@@ -546,3 +548,44 @@ class TestCursorSeeding:
             saved = cursor.get(session)
         assert saved is not None
         assert saved.page_token == "EXISTING"
+
+
+class TestConvertNoteEnqueueDeduplication:
+    def test_sets_deduplication_id_and_ignores_duplicate_enqueue_error(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — two note changes; the first succeeds and the second is
+        # already queued in DBOS (raises DBOSQueueDeduplicatedError).
+        drive.get_start_page_token.return_value = "1"
+        drive.changes_list.return_value = ChangesPage(
+            changes=(
+                _change("file-1", name="a.note"),
+                _change("file-2", name="b.note"),
+            ),
+            new_start_page_token="10",
+        )
+        drive.get_metadata.side_effect = lambda fid, fields=None: NoteMetadata(
+            id=fid, name=f"{fid}.note", parents=(SOURCE_FOLDER_ID,)
+        )
+        observed_dedup_ids: list[str | None] = []
+
+        def fake_enqueue(*args: object, **_kwargs: object) -> None:
+            ctx = get_local_dbos_context()
+            observed_dedup_ids.append(ctx.deduplication_id if ctx is not None else None)
+            if args[2] == "file-2":
+                raise DBOSQueueDeduplicatedError("wf-id", CONVERT_QUEUE_NAME, "file-2:file-2.note")
+
+        # WHEN
+        with patch(
+            "sn2md_worker.workflows.poll_changes.DBOS.enqueue_workflow",
+            side_effect=fake_enqueue,
+        ):
+            poll_changes_impl(trigger_source="test", drive=drive, settings=settings)
+
+        # THEN — deduplication_id was set to "{file_id}:{source_path}" and
+        # the duplicate error did not abort the poll or prevent cursor advancement
+        assert observed_dedup_ids == ["file-1:file-1.note", "file-2:file-2.note"]
+        with Session(engine) as session:
+            saved = cursor.get(session)
+        assert saved is not None
+        assert saved.page_token == "10"
