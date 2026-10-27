@@ -25,7 +25,6 @@ class DriveConfig(BaseModel, frozen=True):
 
 class VaultConfig(BaseModel, frozen=True):
     root_path: Path = Path("/vault")
-    mirror_source_layout: bool = True
 
 
 class Sn2mdConfig(BaseModel, frozen=True):

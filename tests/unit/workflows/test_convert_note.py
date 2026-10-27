@@ -40,7 +40,7 @@ def engine(tmp_path: Path) -> Iterator[Engine]:
 @pytest.fixture
 def settings(tmp_path: Path) -> Settings:
     return Settings(
-        vault=VaultConfig(root_path=tmp_path / "vault", mirror_source_layout=True),
+        vault=VaultConfig(root_path=tmp_path / "vault"),
         sn2md=Sn2mdConfig(model="fake-model", api_key=SecretStr("fake-key")),
     )
 
@@ -361,7 +361,7 @@ class TestWhenNoGeminiKeyIsConfigured:
         # GIVEN — neither settings.sn2md.api_key nor LLM_GEMINI_KEY set
         monkeypatch.delenv("LLM_GEMINI_KEY", raising=False)
         settings = Settings(
-            vault=VaultConfig(root_path=tmp_path / "vault", mirror_source_layout=True),
+            vault=VaultConfig(root_path=tmp_path / "vault"),
             sn2md=Sn2mdConfig(model="fake", api_key=None),
         )
         source.get_metadata.return_value = _file_metadata()
@@ -389,7 +389,7 @@ class TestWhenNoGeminiKeyIsConfigured:
         # GIVEN
         monkeypatch.setenv("LLM_GEMINI_KEY", "from-env")
         settings = Settings(
-            vault=VaultConfig(root_path=tmp_path / "vault", mirror_source_layout=True),
+            vault=VaultConfig(root_path=tmp_path / "vault"),
             sn2md=Sn2mdConfig(model="fake-model", api_key=None),
         )
         source.get_metadata.return_value = _file_metadata()

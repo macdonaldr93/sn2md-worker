@@ -731,7 +731,7 @@ layout. Sections:
   `backfill_sweep_cron` (default `0 5 * * *`; drives the
   `backfill-sweep` schedule, §5), debounce timing knobs (currently
   unused; kept for the deferred `debounce_file` workflow)
-- `[vault]` — `root_path`, `mirror_source_layout`
+- `[vault]` — `root_path`
 - `[sn2md]` — `model` (default `gemini/gemini-2.5-pro`), `api_key`
   (SecretStr, optional), `prompt` (optional full-prompt override, §6;
   must keep the `{context}` placeholder).
