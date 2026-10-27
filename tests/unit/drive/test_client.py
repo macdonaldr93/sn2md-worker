@@ -461,3 +461,73 @@ class TestDriveErrorFromHttpClassification:
         err = client_module._drive_error_from_http(_http_error(status))
         assert isinstance(err, DriveTransientError)
         assert not isinstance(err, DrivePermanentError)
+
+
+class TestListAllNotesWhenSubfolderRaisesPermanentError:
+    def test_skips_inaccessible_subfolder_and_continues_walking_siblings(
+        self, instant_drive_retries: None
+    ) -> None:  # noqa: ARG002
+        # GIVEN — root contains two folders ("gone-sub" and "good-sub");
+        # listing "gone-sub" 404s, while "good-sub" yields a note.
+        def fake_list(**kwargs: Any) -> Any:
+            q = kwargs.get("q", "")
+            call = MagicMock()
+            if "'root' in parents" in q:
+                call.execute.return_value = {
+                    "files": [
+                        {
+                            "id": "gone-sub",
+                            "name": "Gone",
+                            "mimeType": client_module.DRIVE_FOLDER_MIME,
+                            "trashed": False,
+                        },
+                        {
+                            "id": "good-sub",
+                            "name": "Good",
+                            "mimeType": client_module.DRIVE_FOLDER_MIME,
+                            "trashed": False,
+                        },
+                    ]
+                }
+            elif "'gone-sub' in parents" in q:
+                call.execute.side_effect = _http_error(404)
+            elif "'good-sub' in parents" in q:
+                call.execute.return_value = {
+                    "files": [
+                        {
+                            "id": "note-1",
+                            "name": "journal.note",
+                            "mimeType": "application/octet-stream",
+                            "trashed": False,
+                        }
+                    ]
+                }
+            return call
+
+        files_mock = MagicMock()
+        files_mock.list.side_effect = fake_list
+        service = MagicMock()
+        service.files.return_value = files_mock
+        drive = _drive_client_with_service(service)
+
+        # WHEN
+        notes = list(drive.list_all_notes("root"))
+
+        # THEN — the inaccessible subfolder is skipped and the sibling note is yielded
+        assert [n.source_path for n in notes] == ["Good/journal.note"]
+
+    def test_reraises_permanent_error_when_root_folder_itself_fails(
+        self, instant_drive_retries: None
+    ) -> None:  # noqa: ARG002
+        # GIVEN — the configured root folder_id itself 404s
+        list_call = MagicMock()
+        list_call.execute.side_effect = _http_error(404)
+        files_mock = MagicMock()
+        files_mock.list.return_value = list_call
+        service = MagicMock()
+        service.files.return_value = files_mock
+        drive = _drive_client_with_service(service)
+
+        # WHEN / THEN
+        with pytest.raises(DrivePermanentError):
+            list(drive.list_all_notes("missing-root"))

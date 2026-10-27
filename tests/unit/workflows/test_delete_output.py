@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from sn2md_worker.config import Settings, VaultConfig
 from sn2md_worker.db import set_engine
 from sn2md_worker.sources.models import NoteMetadata
-from sn2md_worker.sources.protocol import NoteSource
+from sn2md_worker.sources.protocol import NoteSource, SourcePermanentError
 from sn2md_worker.state import conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
@@ -335,3 +335,21 @@ class TestWhenOutputRelPathEscapesVault:
 
         # THEN — the outside directory is untouched
         assert (outside / "canary.txt").exists()
+
+
+class TestWhenFindLiveNoteRaisesSourcePermanentError:
+    def test_treats_parent_permanent_error_as_no_live_note_and_deletes_vault_output(
+        self, engine: Engine, settings: Settings, source: MagicMock, vault_root: Path
+    ) -> None:
+        # GIVEN — parent folder was permanently deleted or unshared in Drive
+        _seed_record(engine, file_id="file-1", parent_folder_id="deleted-parent")
+        note_dir = _seed_output_dir(vault_root)
+        source.find_live_note.side_effect = SourcePermanentError("404 Folder not found")
+
+        # WHEN
+        delete_output_impl(file_id="file-1", source=source, settings=settings)
+
+        # THEN — vault directory and DB record are still cleaned up
+        assert not note_dir.exists()
+        with Session(engine) as session:
+            assert conversions.get_by_logical_key(session, LOGICAL_KEY) is None

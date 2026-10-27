@@ -15,7 +15,7 @@ from sn2md_worker.config import Settings, Sn2mdConfig, VaultConfig
 from sn2md_worker.conversion.multi_page import MultiPageResult, PageOutcome
 from sn2md_worker.db import set_engine
 from sn2md_worker.sources.models import NoteMetadata
-from sn2md_worker.sources.protocol import NoteSource
+from sn2md_worker.sources.protocol import NoteSource, SourcePermanentError
 from sn2md_worker.state import conversions, page_conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
@@ -583,3 +583,47 @@ class TestConvertNoteAcquiresLockAroundWork:
 
         # THEN — invoked exactly once with the normalized logical_key
         spy.assert_called_once_with("Notebooks/2026-07.note")
+
+
+class TestWhenSourceRaisesPermanentError:
+    def test_skips_when_get_metadata_raises_source_permanent_error(
+        self, engine: Engine, settings: Settings, source: MagicMock
+    ) -> None:
+        # GIVEN — file was permanently deleted in Drive before get_metadata
+        source.get_metadata.side_effect = SourcePermanentError("404 File not found")
+
+        # WHEN
+        with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
+            convert_note_impl(
+                file_id="file-1",
+                source_path="Notebooks/2026-07.note",
+                source=source,
+                settings=settings,
+            )
+
+        # THEN — returns cleanly without downloading, converting, or writing a PENDING row
+        source.download.assert_not_called()
+        fake_run.assert_not_called()
+        with Session(engine) as session:
+            assert conversions.get_by_logical_key(session, "Notebooks/2026-07.note") is None
+
+    def test_skips_without_leaving_pending_row_when_download_raises_source_permanent_error(
+        self, engine: Engine, settings: Settings, source: MagicMock
+    ) -> None:
+        # GIVEN — file exists at get_metadata but 404s during download
+        source.get_metadata.return_value = _file_metadata()
+        source.download.side_effect = SourcePermanentError("404 File not found")
+
+        # WHEN
+        with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
+            convert_note_impl(
+                file_id="file-1",
+                source_path="Notebooks/2026-07.note",
+                source=source,
+                settings=settings,
+            )
+
+        # THEN — returns cleanly and leaves no stuck PENDING record in the DB
+        fake_run.assert_not_called()
+        with Session(engine) as session:
+            assert conversions.get_by_logical_key(session, "Notebooks/2026-07.note") is None
