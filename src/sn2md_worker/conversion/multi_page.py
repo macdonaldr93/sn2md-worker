@@ -105,10 +105,33 @@ def run_multi_page(
 
     with tempfile.TemporaryDirectory(prefix="sn2md-pages-") as extract_root:
         pngs = _extract_pngs(note_path, Path(extract_root))
-        previous_markdown = ""
+        total_pages = len(pngs)
+        created_on = now.date().isoformat()
+        page_inputs: list[tuple[Path, bytes, str]] = []
+        # Stage cache-hit pages to their target slots before transcribing any
+        # uncached page so a mid-note Gemini failure after a page insertion
+        # never clobbers shifted cached pages on disk without saving them at
+        # their new indices first.
         for page_index, png_path in enumerate(pngs):
             page_bytes = png_path.read_bytes()
             page_md5 = hashlib.md5(page_bytes, usedforsecurity=False).hexdigest()
+            page_inputs.append((png_path, page_bytes, page_md5))
+            cached_body = cached_bodies_by_hash.get(page_md5)
+            if cached_body is not None:
+                page_md = output_dir / page_filename(page_index)
+                page_png = output_dir / _asset_filename(page_index)
+                rendered = _render_page(
+                    page_index=page_index,
+                    total=total_pages,
+                    llm_output=cached_body,
+                    asset_name=page_png.name,
+                    created_on=created_on,
+                )
+                page_png.write_bytes(page_bytes)
+                page_md.write_text(rendered, encoding="utf-8")
+
+        previous_markdown = ""
+        for page_index, (png_path, page_bytes, page_md5) in enumerate(page_inputs):
             page_md = output_dir / page_filename(page_index)
             page_png = output_dir / _asset_filename(page_index)
             cached_body = cached_bodies_by_hash.get(page_md5)
@@ -137,15 +160,14 @@ def run_multi_page(
 
             rendered = _render_page(
                 page_index=page_index,
-                total=len(pngs),
+                total=total_pages,
                 llm_output=body,
                 asset_name=page_png.name,
-                created_on=now.date().isoformat(),
+                created_on=created_on,
             )
-            # Unconditional write — cache-hit at a shifted index would
-            # otherwise leave nothing at the new slot.
-            page_png.write_bytes(page_bytes)
-            page_md.write_text(rendered, encoding="utf-8")
+            if cached_body is None:
+                page_png.write_bytes(page_bytes)
+                page_md.write_text(rendered, encoding="utf-8")
             previous_markdown = rendered
 
             outcome = PageOutcome(

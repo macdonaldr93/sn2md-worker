@@ -601,6 +601,83 @@ class TestRunMultiPageWhenAPageIsInsertedMidNote:
         page02 = (output_dir / "page-02.md").read_text()
         assert "body NEW" in page02
 
+    def test_preserves_shifted_cached_pages_across_mid_note_gemini_failure(
+        self, tmp_path: Path
+    ) -> None:
+        # GIVEN — prior 1-page conversion ("body A" at page-01.md)
+        note_path = tmp_path / "note.note"
+        note_path.write_bytes(b"note-bytes")
+        output_dir = tmp_path / "vault" / "note"
+        _write_rendered_page(
+            output_dir=output_dir,
+            page_index=0,
+            total=1,
+            body="body A",
+            created_on="2026-07-04",
+        )
+        (output_dir / "page-01.png").write_bytes(b"png-A")
+        existing_pages: dict[int, str] = {0: _md5_hex(b"png-A")}
+
+        pngs_map = {
+            "p1.png": b"png-NEW-1",
+            "p2.png": b"png-NEW-2",
+            "p3.png": b"png-A",
+        }
+
+        def fail_on_second_new_page(*, png_path: Path, **_kwargs: object) -> str:
+            if png_path.name == "p2.png":
+                raise RuntimeError("gemini failed on p2")
+            return "body NEW 1"
+
+        # WHEN — first run inserts two pages before A: p1 succeeds (overwriting
+        # page-01.md and existing_pages[0]) and p2 fails before reaching p3.
+        with (
+            patch(
+                "sn2md_worker.conversion.multi_page.NotebookExtractor.extract_images",
+                _fake_extract_factory(pngs_map),
+            ),
+            patch(
+                "sn2md_worker.conversion.multi_page.transcribe_page",
+                side_effect=fail_on_second_new_page,
+            ),
+            pytest.raises(Sn2mdRunError, match="page 2"),
+        ):
+            run_multi_page(
+                note_path=note_path,
+                output_dir=output_dir,
+                model="fake-model",
+                api_key="fake-key",
+                existing_pages=existing_pages,
+                now=NOW,
+                on_page_done=lambda p: existing_pages.__setitem__(p.page_index, p.page_md5),
+            )
+
+        # AND WHEN — retry runs after the crash
+        with (
+            patch(
+                "sn2md_worker.conversion.multi_page.NotebookExtractor.extract_images",
+                _fake_extract_factory(pngs_map),
+            ),
+            patch(
+                "sn2md_worker.conversion.multi_page.transcribe_page",
+                side_effect=["body NEW 2"],
+            ) as retry_llm,
+        ):
+            result = run_multi_page(
+                note_path=note_path,
+                output_dir=output_dir,
+                model="fake-model",
+                api_key="fake-key",
+                existing_pages=existing_pages,
+                now=NOW,
+            )
+
+        # THEN — on retry, both p1 (index 0) and shifted A (index 2) cache-hit;
+        # only p2 (index 1) calls Gemini.
+        assert retry_llm.call_count == 1
+        assert [p.was_cached for p in result.pages] == [True, False, True]
+        assert "body A" in (output_dir / "page-03.md").read_text()
+
 
 class TestRunMultiPageInvokesOnPageDone:
     def test_callback_fires_once_per_page_with_the_written_outcome(self, tmp_path: Path) -> None:
