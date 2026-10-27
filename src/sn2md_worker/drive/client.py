@@ -29,6 +29,7 @@ from sn2md_worker.sources.models import ListedNote, NoteMetadata
 from sn2md_worker.sources.protocol import (
     NoteSource,
     SourceError,
+    SourceNotFoundError,
     SourcePermanentError,
     SourceTransientError,
 )
@@ -40,6 +41,9 @@ __all__ = [
     "DRIVE_FOLDER_MIME",
     "DriveClient",
     "DriveClientError",
+    "DriveNotFoundError",
+    "DrivePermanentError",
+    "DriveTransientError",
     "get_drive_client",
     "set_drive_client",
 ]
@@ -100,6 +104,10 @@ class DrivePermanentError(DriveClientError, SourcePermanentError):
     """
 
 
+class DriveNotFoundError(DrivePermanentError, SourceNotFoundError):
+    """A Drive HTTP call failed with HTTP 404 (file or folder not found)."""
+
+
 class DriveTransientError(DriveClientError, SourceTransientError):
     """A Drive HTTP call failed with 5xx / 429 / network error after retries.
 
@@ -111,13 +119,15 @@ class DriveTransientError(DriveClientError, SourceTransientError):
 
 
 def _drive_error_from_http(exc: HttpError) -> DriveClientError:
-    """Wrap an HttpError as `Permanent` or `Transient` based on status.
+    """Wrap an HttpError as `NotFound`, `Permanent`, or `Transient` based on status.
 
-    Plain 4xx are permanent (gone/rejected; retrying doesn't help). 429
-    reaches here only after the retry budget is exhausted, so it stays
-    transient, as do 5xx and status-less errors.
+    404 maps to `DriveNotFoundError` (a `DrivePermanentError` + `SourceNotFoundError`).
+    Other non-429 4xx map to `DrivePermanentError`. 429 reaches here only after
+    the retry budget is exhausted, so it stays transient, as do 5xx and status-less errors.
     """
     status = getattr(getattr(exc, "resp", None), "status", None)
+    if status == _HTTP_NOT_FOUND:
+        return DriveNotFoundError(str(exc))
     if (
         isinstance(status, int)
         and _HTTP_CLIENT_ERROR_MIN <= status < _HTTP_SERVER_ERROR_MIN

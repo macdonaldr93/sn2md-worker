@@ -16,6 +16,7 @@ from sn2md_worker.drive import client as client_module
 from sn2md_worker.drive.client import (
     DriveClient,
     DriveClientError,
+    DriveNotFoundError,
     DrivePermanentError,
     DriveTransientError,
 )
@@ -450,9 +451,16 @@ class TestDriveCallOnRefreshError:
 
 
 class TestDriveErrorFromHttpClassification:
-    @pytest.mark.parametrize("status", [400, 401, 403, 404])
-    def test_4xx_maps_to_permanent(self, status: int) -> None:
+    @pytest.mark.parametrize("status", [400, 401, 403])
+    def test_non_404_4xx_maps_to_permanent_but_not_not_found(self, status: int) -> None:
         err = client_module._drive_error_from_http(_http_error(status))
+        assert isinstance(err, DrivePermanentError)
+        assert isinstance(err, DriveClientError)
+        assert not isinstance(err, DriveNotFoundError)
+
+    def test_404_maps_to_drive_not_found_error(self) -> None:
+        err = client_module._drive_error_from_http(_http_error(404))
+        assert isinstance(err, DriveNotFoundError)
         assert isinstance(err, DrivePermanentError)
         assert isinstance(err, DriveClientError)
 

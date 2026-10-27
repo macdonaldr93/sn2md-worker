@@ -14,7 +14,11 @@ from sqlalchemy.orm import Session
 from sn2md_worker.config import Settings, VaultConfig
 from sn2md_worker.db import set_engine
 from sn2md_worker.sources.models import NoteMetadata
-from sn2md_worker.sources.protocol import NoteSource, SourcePermanentError
+from sn2md_worker.sources.protocol import (
+    NoteSource,
+    SourceNotFoundError,
+    SourcePermanentError,
+)
 from sn2md_worker.state import conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
@@ -367,18 +371,34 @@ class TestWhenOutputRelPathEscapesVault:
 
 
 class TestWhenFindLiveNoteRaisesSourcePermanentError:
-    def test_treats_parent_permanent_error_as_no_live_note_and_deletes_vault_output(
+    def test_treats_parent_not_found_as_no_live_note_and_deletes_vault_output(
         self, engine: Engine, settings: Settings, source: MagicMock, vault_root: Path
     ) -> None:
-        # GIVEN — parent folder was permanently deleted or unshared in Drive
+        # GIVEN — parent folder was permanently deleted (404) in Drive
         _seed_record(engine, file_id="file-1", parent_folder_id="deleted-parent")
         note_dir = _seed_output_dir(vault_root)
-        source.find_live_note.side_effect = SourcePermanentError("404 Folder not found")
+        source.find_live_note.side_effect = SourceNotFoundError("404 Folder not found")
 
         # WHEN
         delete_output_impl(file_id="file-1", source=source, settings=settings)
 
-        # THEN — vault directory and DB record are still cleaned up
+        # THEN — vault directory and DB record are cleaned up
         assert not note_dir.exists()
         with Session(engine) as session:
             assert conversions.get_by_logical_key(session, LOGICAL_KEY) is None
+
+    def test_skips_without_deleting_when_find_live_note_raises_non_404_permanent_error(
+        self, engine: Engine, settings: Settings, source: MagicMock, vault_root: Path
+    ) -> None:
+        # GIVEN — Drive returns a 403/401/400 permanent error when querying parent
+        _seed_record(engine, file_id="file-1", parent_folder_id="parent-1")
+        note_dir = _seed_output_dir(vault_root)
+        source.find_live_note.side_effect = SourcePermanentError("403 Forbidden")
+
+        # WHEN
+        delete_output_impl(file_id="file-1", source=source, settings=settings)
+
+        # THEN — refuses to delete vault directory or DB record on ambiguous 4xx
+        assert note_dir.exists()
+        with Session(engine) as session:
+            assert conversions.get_by_logical_key(session, LOGICAL_KEY) is not None

@@ -252,6 +252,15 @@ def _extract_created_date(rendered: str) -> str | None:
     return match.group(1) if match is not None else None
 
 
+def _png_md5(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    try:
+        return hashlib.md5(path.read_bytes(), usedforsecurity=False).hexdigest()
+    except OSError:
+        return None
+
+
 def _preload_cached_pages(
     existing_pages: dict[int, str], output_dir: Path
 ) -> tuple[dict[str, str], dict[str, str]]:
@@ -265,6 +274,9 @@ def _preload_cached_pages(
     covered: set[int] = set()
 
     for old_index, page_md5 in existing_pages.items():
+        png_path = output_dir / _asset_filename(old_index)
+        if png_path.exists() and _png_md5(png_path) != page_md5:
+            continue
         cached = _read_page_at(output_dir, old_index)
         if cached is None:
             continue
@@ -281,14 +293,9 @@ def _preload_cached_pages(
         idx = page_index_from_filename(md_path.name)
         if idx is None or idx in covered:
             continue
-        png_path = output_dir / _asset_filename(idx)
-        if not png_path.is_file():
+        png_md5 = _png_md5(output_dir / _asset_filename(idx))
+        if png_md5 is None:
             continue
-        try:
-            png_bytes = png_path.read_bytes()
-        except OSError:
-            continue
-        png_md5 = hashlib.md5(png_bytes, usedforsecurity=False).hexdigest()
         cached = _read_page_at(output_dir, idx)
         if cached is None:
             continue

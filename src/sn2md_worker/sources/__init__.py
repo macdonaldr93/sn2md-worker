@@ -4,6 +4,7 @@ from sn2md_worker.sources.models import ListedNote, NoteMetadata
 from sn2md_worker.sources.protocol import (
     NoteSource,
     SourceError,
+    SourceNotFoundError,
     SourcePermanentError,
     SourceTransientError,
 )
@@ -13,6 +14,7 @@ __all__ = [
     "NoteMetadata",
     "NoteSource",
     "SourceError",
+    "SourceNotFoundError",
     "SourcePermanentError",
     "SourceTransientError",
 ]

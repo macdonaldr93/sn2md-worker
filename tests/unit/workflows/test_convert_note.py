@@ -15,7 +15,11 @@ from sn2md_worker.config import Settings, Sn2mdConfig, VaultConfig
 from sn2md_worker.conversion.multi_page import MultiPageResult, PageOutcome
 from sn2md_worker.db import set_engine
 from sn2md_worker.sources.models import NoteMetadata
-from sn2md_worker.sources.protocol import NoteSource, SourcePermanentError
+from sn2md_worker.sources.protocol import (
+    NoteSource,
+    SourceNotFoundError,
+    SourcePermanentError,
+)
 from sn2md_worker.state import conversions, page_conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import Base, ConversionStatus
@@ -586,11 +590,11 @@ class TestConvertNoteAcquiresLockAroundWork:
 
 
 class TestWhenSourceRaisesPermanentError:
-    def test_skips_when_get_metadata_raises_source_permanent_error(
+    def test_skips_when_get_metadata_raises_source_not_found_error(
         self, engine: Engine, settings: Settings, source: MagicMock
     ) -> None:
         # GIVEN — file was permanently deleted in Drive before get_metadata
-        source.get_metadata.side_effect = SourcePermanentError("404 File not found")
+        source.get_metadata.side_effect = SourceNotFoundError("404 File not found")
 
         # WHEN
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
@@ -601,18 +605,18 @@ class TestWhenSourceRaisesPermanentError:
                 settings=settings,
             )
 
-        # THEN — returns cleanly without downloading, converting, or writing a PENDING row
+        # THEN — returns cleanly without downloading, converting, or writing a DB row
         source.download.assert_not_called()
         fake_run.assert_not_called()
         with Session(engine) as session:
             assert conversions.get_by_logical_key(session, "Notebooks/2026-07.note") is None
 
-    def test_skips_without_leaving_pending_row_when_download_raises_source_permanent_error(
+    def test_skips_without_leaving_pending_row_when_download_raises_source_not_found_error(
         self, engine: Engine, settings: Settings, source: MagicMock
     ) -> None:
         # GIVEN — file exists at get_metadata but 404s during download
         source.get_metadata.return_value = _file_metadata()
-        source.download.side_effect = SourcePermanentError("404 File not found")
+        source.download.side_effect = SourceNotFoundError("404 File not found")
 
         # WHEN
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
@@ -628,9 +632,58 @@ class TestWhenSourceRaisesPermanentError:
         with Session(engine) as session:
             assert conversions.get_by_logical_key(session, "Notebooks/2026-07.note") is None
 
+    def test_records_error_status_without_raising_when_get_metadata_raises_non_404_permanent_error(
+        self, engine: Engine, settings: Settings, source: MagicMock
+    ) -> None:
+        # GIVEN — a non-404 permanent error (e.g. 403 Forbidden) on get_metadata
+        source.get_metadata.side_effect = SourcePermanentError("403 Forbidden")
+
+        # WHEN
+        with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
+            convert_note_impl(
+                file_id="file-1",
+                source_path="Notebooks/2026-07.note",
+                source=source,
+                settings=settings,
+            )
+
+        # THEN — records ERROR status in conversion_records and returns without raising
+        source.download.assert_not_called()
+        fake_run.assert_not_called()
+        with Session(engine) as session:
+            row = conversions.get_by_logical_key(session, "Notebooks/2026-07.note")
+        assert row is not None
+        assert row.last_status == ConversionStatus.ERROR
+        assert "403 Forbidden" in (row.last_error or "")
+
+    def test_records_error_status_without_raising_when_download_raises_non_404_permanent_error(
+        self, engine: Engine, settings: Settings, source: MagicMock
+    ) -> None:
+        # GIVEN — get_metadata succeeds, but download raises 403 Forbidden
+        source.get_metadata.return_value = _file_metadata()
+        source.download.side_effect = SourcePermanentError("403 Forbidden")
+
+        # WHEN
+        with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
+            convert_note_impl(
+                file_id="file-1",
+                source_path="Notebooks/2026-07.note",
+                source=source,
+                settings=settings,
+            )
+
+        # THEN — records ERROR status with metadata fields and returns without raising
+        fake_run.assert_not_called()
+        with Session(engine) as session:
+            row = conversions.get_by_logical_key(session, "Notebooks/2026-07.note")
+        assert row is not None
+        assert row.last_status == ConversionStatus.ERROR
+        assert row.source_name == "2026-07.note"
+        assert "403 Forbidden" in (row.last_error or "")
+
 
 class TestWhenNoteIsRenamedOrMovedInDrive:
-    def test_removes_old_vault_folder_and_old_db_rows_for_same_file_id(
+    def test_seeds_cached_pages_from_old_location_and_removes_old_vault_folder_and_db_rows(
         self, engine: Engine, settings: Settings, source: MagicMock, tmp_path: Path
     ) -> None:
         # GIVEN — file-1 was previously converted at "Notebooks/2026-07.note"
@@ -639,15 +692,26 @@ class TestWhenNoteIsRenamedOrMovedInDrive:
         old_dir = tmp_path / "vault" / "Notebooks" / "2026-07"
         old_dir.mkdir(parents=True)
         (old_dir / "page-01.md").write_text("old note")
+        (old_dir / "page-01.png").write_bytes(b"png-bytes")
+        (old_dir / "index.md").write_text("old index")
 
         source.get_metadata.return_value = _file_metadata(
             id="file-1", name="2026-08.note", md5Checksum="abc123"
         )
         _stub_download(source)
+        observed_seeded_files: dict[str, bool] = {}
+
+        def check_seeded_and_stub(**kwargs: object) -> MultiPageResult:
+            out_dir = kwargs["output_dir"]
+            assert isinstance(out_dir, Path)
+            observed_seeded_files["page-01.md"] = (out_dir / "page-01.md").exists()
+            observed_seeded_files["page-01.png"] = (out_dir / "page-01.png").exists()
+            observed_seeded_files["index.md"] = (out_dir / "index.md").exists()
+            return _run_stub(pages=1)(**kwargs)
 
         # WHEN — the same file_id is converted at its new source_path
         with patch("sn2md_worker.workflows.convert_note.run_multi_page") as fake_run:
-            fake_run.side_effect = _run_stub(pages=1)
+            fake_run.side_effect = check_seeded_and_stub
             convert_note_impl(
                 file_id="file-1",
                 source_path="Archive/2026-08.note",
@@ -655,7 +719,14 @@ class TestWhenNoteIsRenamedOrMovedInDrive:
                 settings=settings,
             )
 
-        # THEN — old vault directory and old DB records are removed, new ones exist
+        # THEN — prior page hashes and on-disk page assets were seeded into the new dir
+        assert fake_run.call_args.kwargs["existing_pages"] == {0: "md5-p0"}
+        assert observed_seeded_files == {
+            "page-01.md": True,
+            "page-01.png": True,
+            "index.md": True,
+        }
+        # AND — old vault directory and old DB records are removed, new ones exist
         assert not old_dir.exists()
         with Session(engine) as session:
             assert conversions.get_by_logical_key(session, "Notebooks/2026-07.note") is None

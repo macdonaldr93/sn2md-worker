@@ -784,6 +784,93 @@ class TestRunMultiPageWhenAPageIsInsertedMidNote:
         assert [p.was_cached for p in result.pages] == [True, False, True]
         assert "body A" in (output_dir / "page-03.md").read_text()
 
+    def test_does_not_corrupt_second_shifted_page_when_first_new_page_fails_gemini(
+        self, tmp_path: Path
+    ) -> None:
+        # GIVEN — prior 2-page conversion ("body A" at page-01, "body B" at page-02)
+        note_path = tmp_path / "note.note"
+        note_path.write_bytes(b"note-bytes")
+        output_dir = tmp_path / "vault" / "note"
+        _write_rendered_page(
+            output_dir=output_dir,
+            page_index=0,
+            total=2,
+            body="body A",
+            created_on="2026-07-04",
+        )
+        (output_dir / "page-01.png").write_bytes(b"png-A")
+        _write_rendered_page(
+            output_dir=output_dir,
+            page_index=1,
+            total=2,
+            body="body B",
+            created_on="2026-07-04",
+        )
+        (output_dir / "page-02.png").write_bytes(b"png-B")
+        existing_pages: dict[int, str] = {
+            0: _md5_hex(b"png-A"),
+            1: _md5_hex(b"png-B"),
+        }
+
+        pngs_map = {
+            "p1.png": b"png-NEW",
+            "p2.png": b"png-A",
+            "p3.png": b"png-B",
+        }
+
+        # WHEN — first run inserts png-NEW at index 0, shifting A to page-02
+        # and B to page-03 during pre-staging, then fails on p1 (index 0) before
+        # any DB row is updated (so existing_pages still has 1 -> md5(B), while
+        # page-02 on disk now contains A's body and PNG).
+        with (
+            patch(
+                "sn2md_worker.conversion.multi_page.NotebookExtractor.extract_images",
+                _fake_extract_factory(pngs_map),
+            ),
+            patch(
+                "sn2md_worker.conversion.multi_page.transcribe_page",
+                side_effect=RuntimeError("gemini failed on p1"),
+            ),
+            pytest.raises(Sn2mdRunError, match="page 1"),
+        ):
+            run_multi_page(
+                note_path=note_path,
+                output_dir=output_dir,
+                model="fake-model",
+                api_key="fake-key",
+                existing_pages=existing_pages,
+                now=NOW,
+                on_page_done=lambda p: existing_pages.__setitem__(p.page_index, p.page_md5),
+            )
+
+        # AND WHEN — retry succeeds on p1
+        with (
+            patch(
+                "sn2md_worker.conversion.multi_page.NotebookExtractor.extract_images",
+                _fake_extract_factory(pngs_map),
+            ),
+            patch(
+                "sn2md_worker.conversion.multi_page.transcribe_page",
+                side_effect=["body NEW"],
+            ) as retry_llm,
+        ):
+            result = run_multi_page(
+                note_path=note_path,
+                output_dir=output_dir,
+                model="fake-model",
+                api_key="fake-key",
+                existing_pages=existing_pages,
+                now=NOW,
+            )
+
+        # THEN — both shifted pages (A at page-02 and B at page-03) retain their
+        # distinct bodies without B being overwritten by A's body.
+        assert retry_llm.call_count == 1
+        assert [p.was_cached for p in result.pages] == [False, True, True]
+        assert "body NEW" in (output_dir / "page-01.md").read_text()
+        assert "body A" in (output_dir / "page-02.md").read_text()
+        assert "body B" in (output_dir / "page-03.md").read_text()
+
 
 class TestRunMultiPageInvokesOnPageDone:
     def test_callback_fires_once_per_page_with_the_written_outcome(self, tmp_path: Path) -> None:

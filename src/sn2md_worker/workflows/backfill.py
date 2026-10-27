@@ -98,7 +98,7 @@ def backfill_impl(
                     unsafe += 1
                     continue
 
-                if _needs_conversion(existing.get(key), file.md5_checksum):
+                if _needs_conversion(existing.get(key), file_id=file.id, md5=file.md5_checksum):
                     try:
                         with SetEnqueueOptions(deduplication_id=f"{file.id}:{source_path}"):
                             DBOS.enqueue_workflow(
@@ -126,9 +126,13 @@ def backfill_impl(
             raise
 
 
-def _needs_conversion(record: ConversionRecordView | None, md5: str | None) -> bool:
+def _needs_conversion(
+    record: ConversionRecordView | None, *, file_id: str, md5: str | None
+) -> bool:
     if record is None:
         return True
     if record.last_status != ConversionStatus.SUCCESS:
+        return True
+    if record.current_file_id != file_id:
         return True
     return record.source_md5 != md5
