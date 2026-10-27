@@ -101,7 +101,9 @@ def run_multi_page(
     output_dir.mkdir(parents=True, exist_ok=True)
     prompt_template = prompt or DEFAULT_PROMPT
     outcomes: list[PageOutcome] = []
-    cached_bodies_by_hash = _preload_cached_bodies(existing_pages, output_dir)
+    cached_bodies_by_hash, cached_created_by_hash = _preload_cached_pages(
+        existing_pages, output_dir
+    )
 
     with tempfile.TemporaryDirectory(prefix="sn2md-pages-") as extract_root:
         pngs = _extract_pngs(note_path, Path(extract_root))
@@ -120,15 +122,16 @@ def run_multi_page(
             if cached_body is not None:
                 page_md = output_dir / page_filename(page_index)
                 page_png = output_dir / _asset_filename(page_index)
+                cached_created = cached_created_by_hash.get(page_md5) or now.date().isoformat()
                 rendered = _render_page(
                     page_index=page_index,
                     total=total_pages,
                     llm_output=cached_body,
                     asset_name=page_png.name,
-                    created_on=created_on,
+                    created_on=cached_created,
                 )
-                page_png.write_bytes(page_bytes)
-                page_md.write_text(rendered, encoding="utf-8")
+                _write_bytes_if_changed(page_png, page_bytes)
+                _write_text_if_changed(page_md, rendered)
 
         previous_markdown = ""
         for page_index, (png_path, page_bytes, page_md5) in enumerate(page_inputs):
@@ -138,7 +141,9 @@ def run_multi_page(
 
             if cached_body is not None:
                 body = cached_body
+                created_on = cached_created_by_hash.get(page_md5) or now.date().isoformat()
             else:
+                created_on = now.date().isoformat()
                 context = _tail(previous_markdown)
                 try:
                     body = transcribe_page(
@@ -166,8 +171,8 @@ def run_multi_page(
                 created_on=created_on,
             )
             if cached_body is None:
-                page_png.write_bytes(page_bytes)
-                page_md.write_text(rendered, encoding="utf-8")
+                _write_bytes_if_changed(page_png, page_bytes)
+                _write_text_if_changed(page_md, rendered)
             previous_markdown = rendered
 
             outcome = PageOutcome(
@@ -214,6 +219,7 @@ def page_index_from_filename(name: str) -> int | None:
 # not an inline image the user might have added mid-body.
 _TRAILING_IMAGE_RE = re.compile(r"\n\n!\[Page \d+\]\(page-\d+\.png\)\n?\Z")
 _FRONTMATTER_OPEN = "---\n"
+_CREATED_RE = re.compile(r"^created:\s*(\S+)\s*$", re.MULTILINE)
 _FRONTMATTER_CLOSE = "\n---\n\n"
 
 
@@ -235,22 +241,41 @@ def _extract_cached_body(rendered: str) -> str | None:
     return stripped
 
 
-def _preload_cached_bodies(existing_pages: dict[int, str], output_dir: Path) -> dict[str, str]:
-    """Index prior page bodies by md5 for hash-first cache lookup. Two
-    passes: DB rows use their recorded md5; orphan .md files (crashed
-    between .md write and DB upsert) key on the sibling .png's md5."""
+def _extract_created_date(rendered: str) -> str | None:
+    """Extract the `created:` date from the YAML frontmatter block, if present."""
+    if not rendered.startswith("---\n"):
+        return None
+    close_idx = rendered.find("\n---")
+    if close_idx == -1:
+        return None
+    match = _CREATED_RE.search(rendered[:close_idx])
+    return match.group(1) if match is not None else None
+
+
+def _preload_cached_pages(
+    existing_pages: dict[int, str], output_dir: Path
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Index prior page bodies and created dates by md5 for hash-first cache lookup.
+
+    Two passes: DB rows use their recorded md5; orphan .md files (crashed
+    between .md write and DB upsert) key on the sibling .png's md5.
+    """
     bodies: dict[str, str] = {}
+    created_dates: dict[str, str] = {}
     covered: set[int] = set()
 
     for old_index, page_md5 in existing_pages.items():
-        body = _read_body_at(output_dir, old_index)
-        if body is None:
+        cached = _read_page_at(output_dir, old_index)
+        if cached is None:
             continue
+        body, created_on = cached
         bodies.setdefault(page_md5, body)
+        if created_on is not None:
+            created_dates.setdefault(page_md5, created_on)
         covered.add(old_index)
 
     if not output_dir.is_dir():
-        return bodies
+        return bodies, created_dates
 
     for md_path in output_dir.glob("page-*.md"):
         idx = page_index_from_filename(md_path.name)
@@ -264,15 +289,18 @@ def _preload_cached_bodies(existing_pages: dict[int, str], output_dir: Path) -> 
         except OSError:
             continue
         png_md5 = hashlib.md5(png_bytes, usedforsecurity=False).hexdigest()
-        body = _read_body_at(output_dir, idx)
-        if body is None:
+        cached = _read_page_at(output_dir, idx)
+        if cached is None:
             continue
+        body, created_on = cached
         bodies.setdefault(png_md5, body)
+        if created_on is not None:
+            created_dates.setdefault(png_md5, created_on)
 
-    return bodies
+    return bodies, created_dates
 
 
-def _read_body_at(output_dir: Path, page_index: int) -> str | None:
+def _read_page_at(output_dir: Path, page_index: int) -> tuple[str, str | None] | None:
     path = output_dir / page_filename(page_index)
     if not path.is_file():
         return None
@@ -280,7 +308,28 @@ def _read_body_at(output_dir: Path, page_index: int) -> str | None:
         rendered = path.read_text(encoding="utf-8")
     except OSError:
         return None
-    return _extract_cached_body(rendered)
+    body = _extract_cached_body(rendered)
+    if body is None:
+        return None
+    return body, _extract_created_date(rendered)
+
+
+def _write_bytes_if_changed(path: Path, data: bytes) -> None:
+    try:
+        if path.is_file() and path.read_bytes() == data:
+            return
+    except OSError:
+        pass
+    path.write_bytes(data)
+
+
+def _write_text_if_changed(path: Path, text: str) -> None:
+    try:
+        if path.is_file() and path.read_text(encoding="utf-8") == text:
+            return
+    except OSError:
+        pass
+    path.write_text(text, encoding="utf-8")
 
 
 def _asset_filename(page_index: int) -> str:
@@ -348,9 +397,18 @@ def _write_index(
     note_basename: str,
     now: datetime,
 ) -> None:
+    index_path = output_dir / index_filename()
+    created_on = now.date().isoformat()
+    if index_path.is_file():
+        try:
+            existing_created = _extract_created_date(index_path.read_text(encoding="utf-8"))
+            if existing_created is not None:
+                created_on = existing_created
+        except OSError:
+            pass
     lines = [
         "---",
-        f"created: {now.date().isoformat()}",
+        f"created: {created_on}",
         "tags: supernote",
         "---",
         "",
@@ -363,4 +421,4 @@ def _write_index(
         page_stem = outcome.output_rel_path.removesuffix(".md")
         lines.append(f"- [[{page_stem}]]")
     lines.append("")
-    (output_dir / index_filename()).write_text("\n".join(lines), encoding="utf-8")
+    _write_text_if_changed(index_path, "\n".join(lines))

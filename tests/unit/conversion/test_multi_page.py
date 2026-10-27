@@ -296,6 +296,77 @@ class TestRunMultiPageWithCachedPages:
         cached_md = (output_dir / "page-01.md").read_text()
         assert "previous content for page 1" in cached_md
         assert "of: 2" in cached_md
+        assert "created: 2026-07-04" in cached_md
+        new_md = (output_dir / "page-02.md").read_text()
+        assert "created: 2026-07-05" in new_md
+
+    def test_preserves_index_created_date_and_skips_rewriting_identical_files(
+        self, tmp_path: Path
+    ) -> None:
+        # GIVEN — a 1-page note initially converted on 2026-07-04
+        note_path = tmp_path / "note.note"
+        note_path.write_bytes(b"note-bytes")
+        output_dir = tmp_path / "vault" / "note"
+        earlier = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+        page1_bytes = b"page-1-bytes"
+        page1_md5 = _md5_hex(page1_bytes)
+
+        with (
+            patch(
+                "sn2md_worker.conversion.multi_page.NotebookExtractor.extract_images",
+                _fake_extract_factory({"p1.png": page1_bytes}),
+            ),
+            patch(
+                "sn2md_worker.conversion.multi_page.transcribe_page",
+                return_value="body 1",
+            ),
+        ):
+            run_multi_page(
+                note_path=note_path,
+                output_dir=output_dir,
+                model="fake-model",
+                api_key="fake-key",
+                existing_pages={},
+                now=earlier,
+            )
+
+        # WHEN — re-run on a later date (NOW = 2026-07-05) with the same 1 page
+        written_targets: list[Path] = []
+        orig_write_text = Path.write_text
+        orig_write_bytes = Path.write_bytes
+
+        def recording_write_text(self: Path, *args: Any, **kwargs: Any) -> int:
+            written_targets.append(self)
+            return orig_write_text(self, *args, **kwargs)
+
+        def recording_write_bytes(self: Path, data: bytes) -> int:
+            if self.parent == output_dir:
+                written_targets.append(self)
+            return orig_write_bytes(self, data)
+
+        with (
+            patch(
+                "sn2md_worker.conversion.multi_page.NotebookExtractor.extract_images",
+                _fake_extract_factory({"p1.png": page1_bytes}),
+            ),
+            patch("sn2md_worker.conversion.multi_page.transcribe_page") as fake_llm,
+            patch.object(Path, "write_text", recording_write_text),
+            patch.object(Path, "write_bytes", recording_write_bytes),
+        ):
+            run_multi_page(
+                note_path=note_path,
+                output_dir=output_dir,
+                model="fake-model",
+                api_key="fake-key",
+                existing_pages={0: page1_md5},
+                now=NOW,
+            )
+
+        # THEN — created dates remain 2026-07-04 and no output_dir files were rewritten
+        fake_llm.assert_not_called()
+        assert written_targets == []
+        assert "created: 2026-07-04" in (output_dir / "page-01.md").read_text()
+        assert "created: 2026-07-04" in (output_dir / "index.md").read_text()
 
 
 class TestRunMultiPageWhenCacheHashMatchesButPageMdIsMissing:
