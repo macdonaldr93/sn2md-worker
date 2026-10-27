@@ -20,6 +20,7 @@ from sn2md_worker.sources.models import ListedNote, NoteMetadata
 __all__ = [
     "NoteSource",
     "SourceError",
+    "SourceNotFoundError",
     "SourcePermanentError",
     "SourceTransientError",
 ]
@@ -40,6 +41,16 @@ class SourcePermanentError(SourceError):
 
     The condition won't change on retry, so callers can log-and-skip and
     move on to whatever's next instead of stalling the pipeline.
+    """
+
+
+class SourceNotFoundError(SourcePermanentError):
+    """Requested file or folder does not exist (e.g. HTTP 404).
+
+    Distinguishes a benign deletion race from other permanent errors
+    (such as 400/401/403 permission or request failures) so workflows
+    can skip missing files cleanly while recording permission/request
+    failures as errors.
     """
 
 

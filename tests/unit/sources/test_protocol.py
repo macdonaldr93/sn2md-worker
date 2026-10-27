@@ -11,6 +11,7 @@ import pytest
 
 from sn2md_worker.drive.client import (
     DriveClient,
+    DriveNotFoundError,
     DrivePermanentError,
     DriveTransientError,
 )
@@ -19,6 +20,7 @@ from sn2md_worker.sources import (
     NoteMetadata,
     NoteSource,
     SourceError,
+    SourceNotFoundError,
     SourcePermanentError,
     SourceTransientError,
 )
@@ -99,6 +101,22 @@ class TestWhenCallersDistinguishRetryabilityAtTheSeam:
 
         # THEN
         assert caught is False
+
+    def test_not_found_error_is_caught_by_both_not_found_and_permanent_handlers(self) -> None:
+        # GIVEN
+        error = DriveNotFoundError("404: file gone")
+
+        # WHEN / THEN
+        assert _is_caught_by(error, SourceNotFoundError) is True
+        assert _is_caught_by(error, SourcePermanentError) is True
+
+    def test_non_404_permanent_error_is_not_caught_by_not_found_handler(self) -> None:
+        # GIVEN
+        error = DrivePermanentError("403: forbidden")
+
+        # WHEN / THEN
+        assert _is_caught_by(error, SourceNotFoundError) is False
+        assert _is_caught_by(error, SourcePermanentError) is True
 
 
 class TestWhenACallerTriesToMutateASeamModel:

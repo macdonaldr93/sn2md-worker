@@ -21,15 +21,20 @@ from sn2md_worker.conversion.paths import (
     logical_key,
     note_output_dir,
     output_rel_path,
+    resolve_vault_subdir,
 )
 from sn2md_worker.correlation import new_correlation_id
 from sn2md_worker.db import sql_session
 from sn2md_worker.drive.client import get_drive_client
 from sn2md_worker.logging import get_logger
 from sn2md_worker.sources.models import NoteMetadata
-from sn2md_worker.sources.protocol import NoteSource, SourcePermanentError
+from sn2md_worker.sources.protocol import (
+    NoteSource,
+    SourceNotFoundError,
+    SourcePermanentError,
+)
 from sn2md_worker.state import conversions, page_conversions
-from sn2md_worker.state.conversions import ConversionUpsert
+from sn2md_worker.state.conversions import ConversionRecordView, ConversionUpsert
 from sn2md_worker.state.models import ConversionStatus
 from sn2md_worker.state.page_conversions import PageConversionUpsert
 from sn2md_worker.workflows.locks import lock_for
@@ -82,6 +87,7 @@ def convert_note_impl(
         _log.info("convert_note_started")
         # Lock before the up-to-date check so two workers can't both
         # observe "stale" and both re-run.
+        stale_records: list[ConversionRecordView] = []
         with lock_for(key):
             meta: NoteMetadata | None = None
             try:
@@ -94,10 +100,17 @@ def convert_note_impl(
                     _log.info("convert_note_skipped", reason="up_to_date")
                     return
 
+                stale_records = _load_stale_records_for_file(file_id=file_id, exclude_key=key)
                 existing_pages = _load_existing_pages(key)
                 now = datetime.now(UTC)
                 parent_folder_id = meta.parents[0] if meta.parents else None
                 output_dir = note_output_dir(source_path, settings.vault.root_path)
+                if not existing_pages and stale_records:
+                    existing_pages = _seed_from_prior_location(
+                        stale=stale_records[0],
+                        output_dir=output_dir,
+                        vault_root=settings.vault.root_path,
+                    )
 
                 with tempfile.TemporaryDirectory(prefix="sn2md-worker-") as tmp_root:
                     note_path = source.download(file_id, Path(tmp_root), meta.name)
@@ -133,12 +146,10 @@ def convert_note_impl(
 
                 _persist_finalize(
                     key=key,
-                    file_id=file_id,
                     result=result,
                     now=now,
                     source_md5=meta.md5_checksum,
                     output_dir=output_dir,
-                    vault_root=settings.vault.root_path,
                     note_basename=Path(meta.name).stem,
                 )
 
@@ -148,9 +159,24 @@ def convert_note_impl(
                     gemini_calls=result.gemini_calls,
                     cache_hits=result.cache_hits,
                 )
-            except SourcePermanentError as exc:
+            except SourceNotFoundError as exc:
                 _log.warning(
                     "convert_note_skipped",
+                    reason="source_not_found",
+                    error=str(exc),
+                )
+                return
+            except SourcePermanentError as exc:
+                _persist_failure(
+                    key=key,
+                    file_id=file_id,
+                    source_name=meta.name if meta is not None else PurePosixPath(key).name,
+                    source_path=source_path,
+                    error=str(exc),
+                    when=datetime.now(UTC),
+                )
+                _log.error(
+                    "convert_note_failed",
                     reason="source_permanent_error",
                     error=str(exc),
                 )
@@ -166,6 +192,13 @@ def convert_note_impl(
                 )
                 _log.error("convert_note_failed", error=str(exc), exc_info=True)
                 raise
+
+        for stale in stale_records:
+            _cleanup_moved_record(
+                stale_key=stale.logical_key,
+                file_id=file_id,
+                vault_root=settings.vault.root_path,
+            )
 
 
 def _already_up_to_date(*, key: str, file_id: str, md5: str | None) -> bool:
@@ -184,6 +217,33 @@ def _load_existing_pages(logical_key_value: str) -> dict[int, str]:
     with sql_session() as session:
         rows = page_conversions.list_for_note(session, logical_key_value)
     return {row.page_index: row.page_md5 for row in rows}
+
+
+def _load_stale_records_for_file(*, file_id: str, exclude_key: str) -> list[ConversionRecordView]:
+    with sql_session() as session:
+        return [
+            record
+            for record in conversions.list_by_current_file_id(session, file_id)
+            if record.logical_key != exclude_key
+        ]
+
+
+def _seed_from_prior_location(
+    *, stale: ConversionRecordView, output_dir: Path, vault_root: Path
+) -> dict[int, str]:
+    prior_pages = _load_existing_pages(stale.logical_key)
+    old_dir, _ = resolve_vault_subdir(stale.output_rel_path, vault_root)
+    if old_dir is not None and old_dir.is_dir():
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for src_file in old_dir.glob("page-*.*"):
+            dst_file = output_dir / src_file.name
+            if not dst_file.exists():
+                shutil.copy2(src_file, dst_file)
+        old_index = old_dir / "index.md"
+        dst_index = output_dir / "index.md"
+        if old_index.is_file() and not dst_index.exists():
+            shutil.copy2(old_index, dst_index)
+    return prior_pages
 
 
 def _persist_pending_start(
@@ -250,12 +310,10 @@ def _persist_page(*, key: str, page: PageOutcome, when: datetime) -> None:
 def _persist_finalize(
     *,
     key: str,
-    file_id: str,
     result: MultiPageResult,
     now: datetime,
     source_md5: str | None,
     output_dir: Path,
-    vault_root: Path,
     note_basename: str,
 ) -> None:
     with sql_session() as session, session.begin():
@@ -264,15 +322,6 @@ def _persist_finalize(
         page_conversions.delete_pages_at_or_beyond(
             session, logical_key=key, page_index=len(result.pages)
         )
-        stale_records = [
-            record
-            for record in conversions.list_by_current_file_id(session, file_id)
-            if record.logical_key != key
-        ]
-        for stale in stale_records:
-            if _delete_stale_vault_dir(stale.output_rel_path, vault_root):
-                conversions.delete_by_logical_key(session, stale.logical_key)
-                page_conversions.delete_all_for_note(session, stale.logical_key)
     _cleanup_stale_pages(
         note_output_dir=output_dir,
         current_page_count=len(result.pages),
@@ -280,17 +329,30 @@ def _persist_finalize(
     )
 
 
+def _cleanup_moved_record(*, stale_key: str, file_id: str, vault_root: Path) -> None:
+    with lock_for(stale_key):
+        with sql_session() as session:
+            stale = conversions.get_by_logical_key(session, stale_key)
+        if stale is None or stale.current_file_id != file_id:
+            return
+        if not _delete_stale_vault_dir(stale.output_rel_path, vault_root):
+            return
+        with sql_session() as session, session.begin():
+            current = conversions.get_by_logical_key(session, stale_key)
+            if current is not None and current.current_file_id == file_id:
+                conversions.delete_by_logical_key(session, stale_key)
+                page_conversions.delete_all_for_note(session, stale_key)
+
+
 def _delete_stale_vault_dir(output_rel_path_value: str, vault_root: Path) -> bool:
-    normalized = output_rel_path_value.strip()
-    if not normalized:
-        return False
-    target = (vault_root / normalized).resolve()
-    root = vault_root.resolve()
-    try:
-        target.relative_to(root)
-    except ValueError:
-        return False
-    if target == root:
+    target, err = resolve_vault_subdir(output_rel_path_value, vault_root)
+    if target is None:
+        _log.warning(
+            "convert_note_stale_vault_guard",
+            reason=err,
+            output_rel_path=output_rel_path_value,
+            vault_root=str(vault_root),
+        )
         return False
     if target.exists():
         shutil.rmtree(target)

@@ -15,6 +15,7 @@ __all__ = [
     "logical_key",
     "note_output_dir",
     "output_rel_path",
+    "resolve_vault_subdir",
     "sn2md_output_dir",
 ]
 
@@ -68,6 +69,33 @@ def output_rel_path(drive_source_path: str) -> str:
     if str(parent) in ("", "."):
         return stem
     return f"{parent}/{stem}"
+
+
+def resolve_vault_subdir(
+    output_rel_path_value: str, vault_root: Path
+) -> tuple[Path | None, str | None]:
+    """Resolve `output_rel_path_value` under `vault_root`.
+
+    Returns `(target, None)` when `target` is a strict subdirectory of
+    `vault_root`, or `(None, reason)` if empty, outside `vault_root`,
+    or equal to `vault_root` itself.
+    """
+    normalized = output_rel_path_value.strip()
+    if not normalized:
+        return None, "empty_rel_path"
+
+    target = (vault_root / normalized).resolve()
+    root = vault_root.resolve()
+
+    try:
+        target.relative_to(root)
+    except ValueError:
+        return None, "path_outside_vault"
+
+    if target == root:
+        return None, "target_equals_vault_root"
+
+    return target, None
 
 
 def _normalize(drive_source_path: str) -> str:

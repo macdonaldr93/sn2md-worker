@@ -8,11 +8,16 @@ from dbos import DBOS, SetEnqueueOptions
 from dbos._error import DBOSQueueDeduplicatedError
 
 from sn2md_worker.config import Settings, get_settings
+from sn2md_worker.conversion.paths import resolve_vault_subdir
 from sn2md_worker.correlation import new_correlation_id
 from sn2md_worker.db import sql_session
 from sn2md_worker.drive.client import get_drive_client
 from sn2md_worker.logging import get_logger
-from sn2md_worker.sources.protocol import NoteSource, SourcePermanentError
+from sn2md_worker.sources.protocol import (
+    NoteSource,
+    SourceNotFoundError,
+    SourcePermanentError,
+)
 from sn2md_worker.state import conversions, page_conversions
 from sn2md_worker.workflows.convert_note import convert_note
 from sn2md_worker.workflows.locks import lock_for
@@ -74,13 +79,22 @@ def delete_output_impl(
                 if record.parent_folder_id:
                     try:
                         live = source.find_live_note(record.parent_folder_id, record.source_name)
-                    except SourcePermanentError as exc:
+                    except SourceNotFoundError as exc:
                         _log.warning(
-                            "delete_output_live_lookup_permanent_error",
+                            "delete_output_live_lookup_not_found",
                             parent_folder_id=record.parent_folder_id,
                             error=str(exc),
                         )
                         live = None
+                    except SourcePermanentError as exc:
+                        _log.warning(
+                            "delete_output_skipped",
+                            reason="live_lookup_permanent_error",
+                            parent_folder_id=record.parent_folder_id,
+                            logical_key=record.logical_key,
+                            error=str(exc),
+                        )
+                        return
                     if live is not None and live.id != file_id:
                         _repoint(logical_key=record.logical_key, new_file_id=live.id)
                         # Guards against a delete-side push without a
@@ -137,31 +151,17 @@ def _repoint(*, logical_key: str, new_file_id: str) -> None:
 
 
 def _delete_from_vault(output_rel_path: str, vault_root: Path) -> bool:
-    normalized = output_rel_path.strip()
-    if not normalized:
-        _log.warning("delete_output_vault_guard", reason="empty_rel_path")
-        return False
-
-    target = (vault_root / normalized).resolve()
-    root = vault_root.resolve()
-
-    try:
-        target.relative_to(root)
-    except ValueError:
-        _log.error(
-            "delete_output_vault_guard",
-            reason="path_outside_vault",
-            target=str(target),
-            vault_root=str(root),
-        )
-        return False
-
-    if target == root:
-        _log.error(
-            "delete_output_vault_guard",
-            reason="target_equals_vault_root",
-            target=str(target),
-        )
+    target, err = resolve_vault_subdir(output_rel_path, vault_root)
+    if target is None:
+        if err == "empty_rel_path":
+            _log.warning("delete_output_vault_guard", reason=err)
+        else:
+            _log.error(
+                "delete_output_vault_guard",
+                reason=err,
+                output_rel_path=output_rel_path,
+                vault_root=str(vault_root),
+            )
         return False
 
     if target.exists():

@@ -143,6 +143,28 @@ class TestWhenNotesAreAlreadyConverted:
         enqueued_ids = {call.args[2] for call in enqueue.call_args_list}
         assert enqueued_ids == {"f-stale-new", "f-fresh"}
 
+    def test_reenqueues_when_file_id_changed_even_if_md5_matches(
+        self, engine: Engine, settings: Settings, source: MagicMock
+    ) -> None:
+        # GIVEN — a note replaced in Drive with an identical-content new file ID
+        _seed_success(
+            engine,
+            logical_key="Notebooks/replaced.note",
+            file_id="f-old",
+            md5="same-md5",
+        )
+        source.list_all_notes.return_value = iter(
+            [_listed("f-new", "Notebooks/replaced.note", md5="same-md5")]
+        )
+
+        # WHEN
+        with patch("sn2md_worker.workflows.backfill.DBOS.enqueue_workflow") as enqueue:
+            backfill_impl(source=source, settings=settings)
+
+        # THEN — convert_note is enqueued so current_file_id is updated to f-new
+        enqueue.assert_called_once()
+        assert enqueue.call_args.args[2] == "f-new"
+
 
 class TestWhenPreviousRunEndedInError:
     def test_reenqueues_notes_with_error_status(

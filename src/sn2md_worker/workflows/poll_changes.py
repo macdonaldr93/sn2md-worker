@@ -206,14 +206,13 @@ def _dispatch(
         )
         return True
 
-    if change.file is None or not change.file.name.lower().endswith(_NOTE_EXTENSION):
-        return False
-
-    source_path = resolve_source_path(
-        file_id=change.file_id,
-        root_folder_id=settings.drive.source_folder_id,
-        get_metadata=get_metadata,
-    )
+    source_path: str | None = None
+    if change.file is not None and change.file.name.lower().endswith(_NOTE_EXTENSION):
+        source_path = resolve_source_path(
+            file_id=change.file_id,
+            root_folder_id=settings.drive.source_folder_id,
+            get_metadata=get_metadata,
+        )
     if source_path is None:
         with sql_session() as session:
             existing = conversions.get_by_current_file_id(session, change.file_id)
