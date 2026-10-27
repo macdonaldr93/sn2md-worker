@@ -20,8 +20,9 @@ from sn2md_worker.drive.client import (
 )
 from sn2md_worker.drive.models import ChangeEvent, ChangesPage
 from sn2md_worker.sources.models import NoteMetadata
-from sn2md_worker.state import cursor
-from sn2md_worker.state.models import Base
+from sn2md_worker.state import conversions, cursor
+from sn2md_worker.state.conversions import ConversionUpsert
+from sn2md_worker.state.models import Base, ConversionStatus
 from sn2md_worker.workflows.backfill import backfill
 from sn2md_worker.workflows.convert_note import convert_note
 from sn2md_worker.workflows.delete_output import delete_output
@@ -209,6 +210,48 @@ class TestWhenChangeIsOutsideSourceFolder:
 
         # THEN
         enqueue.assert_not_called()
+
+    def test_enqueues_delete_output_when_previously_converted_note_moves_outside_source_tree(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — file-1 was previously converted inside SOURCE_FOLDER_ID,
+        # then moved to OTHER (outside SOURCE_FOLDER_ID) without being trashed.
+        with Session(engine) as session, session.begin():
+            conversions.upsert(
+                session,
+                ConversionUpsert(
+                    logical_key="Notebooks/moved.note",
+                    current_file_id="file-1",
+                    parent_folder_id=SOURCE_FOLDER_ID,
+                    source_name="moved.note",
+                    source_path="Notebooks/moved.note",
+                    source_md5="abc",
+                    output_rel_path="Notebooks/moved",
+                    last_converted_at=datetime(2026, 7, 4, tzinfo=UTC),
+                    status=ConversionStatus.SUCCESS,
+                ),
+            )
+        drive.get_start_page_token.return_value = "1"
+        drive.changes_list.return_value = ChangesPage(
+            changes=(_change("file-1", name="moved.note", parents=("OTHER",)),),
+            new_start_page_token="10",
+        )
+        drive.get_metadata.side_effect = lambda fid, fields=None: (
+            NoteMetadata(id="file-1", name="moved.note", parents=("OTHER",))
+            if fid == "file-1"
+            else NoteMetadata(id="OTHER", name="OtherFolder", parents=())
+        )
+
+        # WHEN
+        with patch("sn2md_worker.workflows.poll_changes.DBOS.enqueue_workflow") as enqueue:
+            poll_changes_impl(trigger_source="test", drive=drive, settings=settings)
+
+        # THEN — delete_output is enqueued to clean up the orphaned vault directory
+        enqueue.assert_called_once()
+        args, _ = enqueue.call_args
+        assert args[0] == DELETE_QUEUE_NAME
+        assert args[1] is delete_output
+        assert args[2] == "file-1"
 
 
 class TestWhenDispatchRaisesMidPage:

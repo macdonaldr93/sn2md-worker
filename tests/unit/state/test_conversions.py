@@ -110,6 +110,26 @@ class TestGetByCurrentFileId:
         # WHEN / THEN
         assert conversions.get_by_current_file_id(session, "file-old") is None
 
+    def test_does_not_raise_when_multiple_records_share_current_file_id(
+        self, session: Session
+    ) -> None:
+        # GIVEN — a note renamed in Drive before the old record was cleaned up
+        conversions.upsert(
+            session, _make_upsert(logical_key="Notebooks/old.note", current_file_id="file-1")
+        )
+        conversions.upsert(
+            session, _make_upsert(logical_key="Notebooks/new.note", current_file_id="file-1")
+        )
+        session.flush()
+
+        # WHEN
+        record = conversions.get_by_current_file_id(session, "file-1")
+        all_records = conversions.list_by_current_file_id(session, "file-1")
+
+        # THEN — returns a record instead of raising MultipleResultsFound
+        assert record is not None
+        assert {r.logical_key for r in all_records} == {"Notebooks/old.note", "Notebooks/new.note"}
+
 
 class TestDeleteByLogicalKey:
     def test_removes_the_row_and_returns_true_when_the_record_exists(

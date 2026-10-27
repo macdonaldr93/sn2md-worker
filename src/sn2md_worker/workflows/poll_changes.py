@@ -15,7 +15,7 @@ from sn2md_worker.drive.models import ChangeEvent
 from sn2md_worker.drive.paths import resolve_source_path
 from sn2md_worker.logging import get_logger
 from sn2md_worker.sources.models import NoteMetadata
-from sn2md_worker.state import cursor
+from sn2md_worker.state import conversions, cursor
 from sn2md_worker.workflows.backfill import backfill
 from sn2md_worker.workflows.convert_note import convert_note
 from sn2md_worker.workflows.delete_output import delete_output
@@ -215,7 +215,18 @@ def _dispatch(
         get_metadata=get_metadata,
     )
     if source_path is None:
-        return False
+        with sql_session() as session:
+            existing = conversions.get_by_current_file_id(session, change.file_id)
+        if existing is None:
+            return False
+        DBOS.enqueue_workflow(DELETE_QUEUE_NAME, delete_output, change.file_id, correlation_id)
+        _log.info(
+            "poll_changes_enqueued",
+            file_id=change.file_id,
+            target="delete_output",
+            reason="moved_outside_source_folder",
+        )
+        return True
 
     try:
         with SetEnqueueOptions(deduplication_id=f"{change.file_id}:{source_path}"):
