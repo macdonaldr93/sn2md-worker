@@ -42,8 +42,7 @@ status_endpoint_enabled = true
 
 [database]
 # Single SQLite/Postgres URL shared by DBOS's workflow state and our own
-# application tables (via dbos.SQLAlchemyDatasource). sqlite:/// prefix;
-# four slashes for absolute paths.
+# application tables. sqlite:/// prefix; four slashes for absolute paths.
 url = "sqlite:///./data/sn2md-worker.sqlite"
 
 [webhook]

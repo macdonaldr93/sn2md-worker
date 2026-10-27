@@ -305,6 +305,8 @@ class TestStatusEndpoint:
                 ("w4", "poll_queue", "PENDING"),
                 ("w5", "poll_queue", "ERROR"),  # terminal → excluded
                 ("w6", None, "PENDING"),  # queue_name NULL → excluded
+                ("w7", "delete_queue", "ENQUEUED"),
+                ("w8", "delete_queue", "SUCCESS"),  # terminal → excluded
             ]:
                 session.execute(
                     text(
@@ -319,8 +321,12 @@ class TestStatusEndpoint:
         # WHEN
         body = client.get("/status").json()
 
-        # THEN — 2 non-terminal in convert_queue, 1 in poll_queue
-        assert body["queue_depth"] == {"convert_queue": 2, "poll_queue": 1}
+        # THEN — 2 non-terminal in convert_queue, 1 in delete_queue, 1 in poll_queue
+        assert body["queue_depth"] == {
+            "convert_queue": 2,
+            "delete_queue": 1,
+            "poll_queue": 1,
+        }
 
     def test_reports_zero_queue_depth_when_workflow_status_table_is_absent(
         self, engine: Engine
@@ -333,7 +339,11 @@ class TestStatusEndpoint:
         body = client.get("/status").json()
 
         # THEN — the query gracefully falls back to defaults instead of 500ing
-        assert body["queue_depth"] == {"convert_queue": 0, "poll_queue": 0}
+        assert body["queue_depth"] == {
+            "convert_queue": 0,
+            "delete_queue": 0,
+            "poll_queue": 0,
+        }
         assert body["backfill"] == {
             "status": None,
             "started_at": None,

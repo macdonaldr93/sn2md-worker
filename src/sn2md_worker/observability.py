@@ -20,7 +20,6 @@ from sn2md_worker.state.watch_channels import WatchChannelView
 
 __all__ = ["router"]
 
-_QUEUE_NAMES = ("convert_queue", "poll_queue")
 _TERMINAL_STATUSES = (
     "SUCCESS",
     "ERROR",
@@ -58,6 +57,7 @@ class QueueDepth(BaseModel):
     """In-flight workflow counts per DBOS queue."""
 
     convert_queue: int = 0
+    delete_queue: int = 0
     poll_queue: int = 0
 
 
@@ -219,6 +219,7 @@ def _query_queue_depth(session: Session) -> QueueDepth:
     counts = {row.queue_name: int(row.cnt) for row in rows}
     return QueueDepth(
         convert_queue=counts.get("convert_queue", 0),
+        delete_queue=counts.get("delete_queue", 0),
         poll_queue=counts.get("poll_queue", 0),
     )
 

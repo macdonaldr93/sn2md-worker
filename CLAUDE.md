@@ -19,7 +19,7 @@ a Docker container on Unraid.
    vault output so it doesn't nuke a `.md` a preceding `convert_note`
    just wrote. See tech-brief §4a.
 
-2. **DBOS + SQLite share ONE file.** `dbos.SQLAlchemyDatasource.create(url)`
+2. **DBOS + SQLite share ONE file.** Our SQLAlchemy engine (`db.py`)
    sits alongside the DBOS-managed engine at the same URL. Our tables:
    `conversion_records`, `page_conversions`, `drive_watch_channels`,
    `drive_change_cursor`, `debounce_state`. Schema init in
@@ -44,7 +44,7 @@ a Docker container on Unraid.
 
 5. **Startup ordering matters and is fragile.** `__main__.py` sequences:
    load settings → configure logging → prep SQLite dir → `create_app` →
-   `DBOS(...)` construct → `init_schema` → `set_settings/set_engine/set_datasource`
+   `DBOS(...)` construct → `init_schema` → `set_settings/set_engine`
    → try DriveClient → import `workflows` package (registers decorators)
    → `seed_cursor_if_ready` → `DBOS.launch()` → `register_queues` →
    `register_schedules` (idempotent — pre-checks via `DBOS.get_schedule`
@@ -106,7 +106,7 @@ src/sn2md_worker/
 ├── config.py           Settings (pydantic-settings) + singleton
 ├── correlation.py      new_correlation_id(): mints the correlation_id
 │                       that workflows carry across enqueue boundaries
-├── db.py               engine + datasource singletons, sql_session(),
+├── db.py               engine singleton, sql_session(),
 │                       global SQLite connect listener (WAL + 30s busy_timeout)
 ├── logging.py          structlog + stdlib JSON setup
 ├── observability.py    /healthz /readyz /status
