@@ -15,7 +15,6 @@ backfill_sweep_cron = "0 5 * * *"
 # Filesystem path inside the container where sn2md output lands.
 # In production this is a bind mount to the Obsidian vault directory.
 root_path = "/vault"
-mirror_source_layout = true
 
 [sn2md]
 # llm-gemini requires the "gemini/" prefix on the model name.

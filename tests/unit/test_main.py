@@ -10,7 +10,7 @@ from sn2md_worker.__main__ import (
     _run_boot_step,
     _try_init_drive_client,
 )
-from sn2md_worker.config import DatabaseConfig, GoogleConfig, Settings
+from sn2md_worker.config import DatabaseConfig, GoogleConfig, Settings, VaultConfig
 from sn2md_worker.drive.client import DriveClientError
 from sn2md_worker.logging import get_logger
 
@@ -165,3 +165,8 @@ class TestTryInitDriveClientReportsMalformedKeyAsFailed:
         assert result.status == "failed"
         assert result.error is not None
         assert result.error.startswith("drive_client: ")
+
+
+class TestVaultConfig:
+    def test_exposes_only_root_path(self) -> None:
+        assert set(VaultConfig.model_fields) == {"root_path"}

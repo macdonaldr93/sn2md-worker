@@ -43,7 +43,7 @@ def vault_root(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def settings(vault_root: Path) -> Settings:
-    return Settings(vault=VaultConfig(root_path=vault_root, mirror_source_layout=True))
+    return Settings(vault=VaultConfig(root_path=vault_root))
 
 
 @pytest.fixture
