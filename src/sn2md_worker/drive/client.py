@@ -363,11 +363,17 @@ class DriveClient:
         """
         body = {"id": channel_id, "resourceId": resource_id}
         try:
-            self._service.channels().stop(body=body).execute()
+            _invoke_with_drive_retry(lambda: self._service.channels().stop(body=body).execute())
         except HttpError as exc:
             if getattr(exc, "resp", None) is not None and exc.resp.status == _HTTP_NOT_FOUND:
                 return
             raise _drive_error_from_http(exc) from exc
+        except GoogleAuthError as exc:
+            raise DriveTransientError(f"Drive auth failure ({type(exc).__name__}): {exc}") from exc
+        except (ServerNotFoundError, ssl.SSLError, TimeoutError, OSError) as exc:
+            raise DriveTransientError(
+                f"Drive transport failure ({type(exc).__name__}): {exc}"
+            ) from exc
 
     def watch_changes(
         self,
