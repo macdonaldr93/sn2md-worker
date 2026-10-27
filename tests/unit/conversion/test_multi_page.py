@@ -90,6 +90,25 @@ class TestSortByPageNumber:
         # THEN — numeric-named pages first, then the odd one out
         assert [p.name for p in ordered] == ["page-1.png", "page-2.png", "cover.png"]
 
+    def test_ignores_earlier_digits_in_temp_prefix_or_note_stem(self, tmp_path: Path) -> None:
+        # GIVEN — sn2md concatenates the output dir (`sn2md-pages-...`) or a
+        # date-stamped note stem before `_<page_num>.png`
+        paths = [
+            tmp_path / "sn2md-pages-abc123_1.png",
+            tmp_path / "sn2md-pages-abc123_10.png",
+            tmp_path / "sn2md-pages-abc123_2.png",
+        ]
+
+        # WHEN
+        ordered = multi_page._sort_by_page_number(paths)
+
+        # THEN — sorted by trailing page number (1, 2, 10), not the "2" in "sn2md"
+        assert [p.name for p in ordered] == [
+            "sn2md-pages-abc123_1.png",
+            "sn2md-pages-abc123_2.png",
+            "sn2md-pages-abc123_10.png",
+        ]
+
 
 class TestDefaultPrompt:
     def test_contains_context_placeholder(self) -> None:

@@ -274,16 +274,18 @@ _PAGE_NUMBER_RE = re.compile(r"\d+")
 
 
 def _sort_by_page_number(paths: list[Path]) -> list[Path]:
-    """Sort by the first integer in the filename, then by name for ties.
+    """Sort by the last integer in the filename stem, then by name for ties.
 
     Guards against sn2md's undocumented filename ordering: lexical sort
     puts `page-10.png` before `page-2.png`, which would misalign the
     (index, hash) cache key and rewrite pages into the wrong slots.
+    Matching the last integer avoids colliding with digits in the temp
+    directory prefix (`sn2md-pages-...`) or date-prefixed note stems.
     """
 
     def key(path: Path) -> tuple[int, str]:
-        match = _PAGE_NUMBER_RE.search(path.stem)
-        return (int(match.group(0)) if match else 10**9, path.name)
+        matches = _PAGE_NUMBER_RE.findall(path.stem)
+        return (int(matches[-1]) if matches else 10**9, path.name)
 
     return sorted(paths, key=key)
 
