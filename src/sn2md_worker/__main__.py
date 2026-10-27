@@ -12,9 +12,7 @@ from sqlalchemy.engine import make_url
 from sn2md_worker.app import create_app
 from sn2md_worker.config import Settings, load_settings, set_settings
 from sn2md_worker.db import (
-    create_datasource,
     create_engine_for,
-    set_datasource,
     set_engine,
 )
 from sn2md_worker.drive.client import (
@@ -51,8 +49,6 @@ def main() -> int:
 
     set_settings(settings)
     set_engine(create_engine_for(settings.database.url))
-    set_datasource(create_datasource(settings.database.url))
-    log.info("datasource_ready")
 
     drive_result = _try_init_drive_client(settings)
 

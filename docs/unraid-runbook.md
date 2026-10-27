@@ -172,16 +172,15 @@ Log lines to watch for in order (`docker logs -f sn2md-worker | jq .`):
 
 1. `dbos_init`
 2. `app_schema_ready`
-3. `datasource_ready`
-4. `drive_client_ready` (`service_account=<...iam.gserviceaccount.com>`)
-5. `dbos_launched`
-6. `queues_registered` → `schedules_registered`
-7. `renew_watch_channel_created` (first channel — this proves the
+3. `drive_client_ready` (`service_account=<...iam.gserviceaccount.com>`)
+4. `dbos_launched`
+5. `queues_registered` → `schedules_registered`
+6. `renew_watch_channel_created` (first channel — this proves the
    reverse proxy is reachable from Google)
-8. `backfill_enqueued` → `backfill_succeeded` (may take a while on a
+7. `backfill_enqueued` → `backfill_succeeded` (may take a while on a
    folder with many existing notes; each note runs through Gemini)
 
-If step 7 doesn't appear, the reverse proxy route is broken — see
+If step 6 doesn't appear, the reverse proxy route is broken — see
 [Troubleshooting](#9-troubleshooting).
 
 ---

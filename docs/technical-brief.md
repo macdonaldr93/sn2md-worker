@@ -28,7 +28,7 @@ able to start coding from here without re-litigating decisions.
     │   └── GET  /status                                 │
     │                                                    │
     │  DBOS runtime (single SQLite file: workflow state  │
-    │    + app tables via SQLAlchemyDatasource)          │
+    │    + application tables)                           │
     │   ├── scheduled: renew_watch_channel (daily 06:00) │
     │   ├── scheduled: scheduled_poll_changes (fallback) │
     │   ├── enqueued : poll_changes  (poll_queue,   c=1) │
@@ -70,7 +70,7 @@ sn2md-worker/
 │   ├── clock.py                    # now_utc() wall-clock seam (tests monkeypatch it)
 │   ├── config.py                   # pydantic-settings, TOML + env, singleton
 │   ├── correlation.py              # new_correlation_id() for cross-enqueue log tracing
-│   ├── db.py                       # engine + SQLAlchemyDatasource singletons, sql_session()
+│   ├── db.py                       # engine singleton, sql_session()
 │   ├── logging.py                  # structlog + stdlib JSON setup, HealthProbeAccessFilter
 │   ├── observability.py            # /healthz /readyz /status
 │   ├── startup_status.py           # boot-step outcomes surfaced at /status.startup
@@ -178,23 +178,13 @@ definitions in §5.
 
 Held in a **single SQLite file** shared with DBOS. DBOS's own workflow
 state lives in tables it manages; our application tables sit alongside
-via `dbos.SQLAlchemyDatasource`, whose `@ds.transaction()` decorator
-gives us atomic writes with DBOS's durability guarantees. One file, one
-volume mount, one backup path.
+in the same SQLite database via our SQLAlchemy engine (`db.py`). One
+file, one volume mount, one backup path.
 
 ```python
 # src/sn2md_worker/db.py
-from dbos import SQLAlchemyDatasource
-datasource = SQLAlchemyDatasource.create(settings.database.url)
-```
-
-Then, from workflows:
-
-```python
-@datasource.transaction()
-def upsert_conversion(...) -> None:
-    session = datasource.sql_session()
-    ...
+with sql_session() as session, session.begin():
+    conversions.upsert(session, ...)
 ```
 
 Application tables managed via SQLAlchemy declarative models. **No
@@ -739,8 +729,8 @@ layout. Sections:
   prefers `api_key` then falls back to the `LLM_GEMINI_KEY` env var.
 - `[queue]` — `convert_concurrency` (default 2)
 - `[observability]` — `log_level`, `status_endpoint_enabled`
-- `[database]` — `url` (single SQLite/Postgres URL; DBOS + app tables
-  share it via `SQLAlchemyDatasource`)
+- `[database]` — `url` (single SQLite/Postgres URL shared by DBOS and
+  application tables)
 - `[webhook]` — `url` (public HTTPS the Google Drive push channel
   targets; empty in dev)
 - `[google]` — `application_credentials` (path to the service account
@@ -934,7 +924,7 @@ LAN-only or behind reverse-proxy auth.
       "is_active": true
     },
     "change_cursor": { "page_token": "...", "last_polled_at": "..." },
-    "queue_depth": { "convert_queue": 0, "poll_queue": 0 },
+    "queue_depth": { "convert_queue": 0, "delete_queue": 0, "poll_queue": 0 },
     "backfill": {
       "status": "SUCCESS",
       "started_at": "...",

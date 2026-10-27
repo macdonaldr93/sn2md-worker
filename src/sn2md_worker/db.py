@@ -3,31 +3,15 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from dbos import SQLAlchemyDatasource
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session
 
 __all__ = [
-    "create_datasource",
     "create_engine_for",
-    "get_datasource",
     "get_engine",
-    "set_datasource",
     "set_engine",
     "sql_session",
 ]
-
-
-def create_datasource(database_url: str) -> SQLAlchemyDatasource:
-    """Build a SQLAlchemyDatasource pointed at the shared application DB.
-
-    For SQLite URLs, hands DBOS `connect_args` so its datasource engine
-    gets the same driver-level timeout and thread policy as ours.
-    """
-    return SQLAlchemyDatasource.create(
-        database_url,
-        engine_kwargs=_engine_kwargs(database_url) or None,
-    )
 
 
 def create_engine_for(database_url: str) -> Engine:
@@ -42,23 +26,11 @@ def create_engine_for(database_url: str) -> Engine:
     return create_engine(database_url, future=True, **_engine_kwargs(database_url))
 
 
-def get_datasource() -> SQLAlchemyDatasource:
-    """Return the process-wide datasource; raises if not yet initialized."""
-    if _Holder.datasource is None:
-        raise RuntimeError("datasource not initialized; call set_datasource() at startup")
-    return _Holder.datasource
-
-
 def get_engine() -> Engine:
     """Return the process-wide engine; raises if not yet initialized."""
     if _Holder.engine is None:
         raise RuntimeError("engine not initialized; call set_engine() at startup")
     return _Holder.engine
-
-
-def set_datasource(datasource: SQLAlchemyDatasource) -> None:
-    """Install the process-wide datasource. Call once from the entrypoint."""
-    _Holder.datasource = datasource
 
 
 def set_engine(engine: Engine) -> None:
@@ -110,5 +82,4 @@ def _configure_sqlite_connection(dbapi_conn: Any, _record: Any) -> None:
 
 
 class _Holder:
-    datasource: SQLAlchemyDatasource | None = None
     engine: Engine | None = None
