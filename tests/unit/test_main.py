@@ -170,3 +170,14 @@ class TestTryInitDriveClientReportsMalformedKeyAsFailed:
 class TestVaultConfig:
     def test_exposes_only_root_path(self) -> None:
         assert set(VaultConfig.model_fields) == {"root_path"}
+
+
+class TestDockerComposeHealthcheckSetsExplicitTimeoutOnUrlopen:
+    def test_urlopen_call_passes_timeout_argument(self) -> None:
+        # GIVEN — the reference docker-compose.yml at the repo root
+        repo_root = Path(__file__).resolve().parents[2]
+        compose_text = (repo_root / "docker-compose.yml").read_text(encoding="utf-8")
+
+        # THEN — the healthcheck python command specifies an explicit socket timeout
+        # on urlopen so a hung HTTP worker does not leave an orphan probe process.
+        assert "u.urlopen('http://localhost:8080/healthz', timeout=" in compose_text

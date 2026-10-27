@@ -153,9 +153,8 @@ Sanity-check the route from off-network:
 
 ```sh
 curl -X POST -H 'X-Goog-Channel-Id: probe' https://sn2md.yourdomain.tld/webhooks/drive
-# Expect 401 Unauthorized (the handler rejects requests without a real channel token).
+# Expect 200 OK (the handler returns 200 for all POSTs to avoid Google retry storms and logs drive_webhook_unauthenticated).
 # 502/504 means the reverse proxy isn't reaching the container.
-# 200 is wrong — it means auth is off.
 ```
 
 ### 1.7 First-boot success signals
@@ -547,7 +546,7 @@ Map the failing step to a fix:
 | `drive_client`                                                                    | `secrets/service-account.json` is malformed or unreadable                                                                                    | Re-download from GCP, replace, `docker restart`                                                                            |
 | `drive_client` == `"deferred"` and log says `drive_client_skipped_no_credentials` | Volume mount wrong — no file at `/secrets/service-account.json`                                                                              | Fix the Unraid volume config; confirm with `docker exec sn2md-worker ls /secrets/`                                         |
 | `seed_cursor`                                                                     | Drive rejected `getStartPageToken` — usually bad credentials (`RefreshError`) or network to `oauth2.googleapis.com` down                     | Verify key by regenerating (§5). If key is good, check the container's egress network                                      |
-| `ensure_channel`                                                                  | `changes().watch()` failed — most often the Drive folder isn't shared to the service account, or the webhook URL isn't reachable from Google | Share the folder to the SA email; verify `curl -X POST https://sn2md.<domain>/webhooks/drive` returns 401 from off-network |
+| `ensure_channel`                                                                  | `changes().watch()` failed — most often the Drive folder isn't shared to the service account, or the webhook URL isn't reachable from Google | Share the folder to the SA email; verify `curl -X POST https://sn2md.<domain>/webhooks/drive` returns 200 from off-network (and logs `drive_webhook_unauthenticated`) |
 | `backfill_enqueue`                                                                | Rare — DBOS enqueue error                                                                                                                    | Check DBOS logs; typically resolves on restart                                                                             |
 
 The daily `renew_watch_channel` cron and the next `docker restart` both
@@ -573,9 +572,9 @@ docker logs sn2md-worker | jq .
 - `SN2MD_WORKER__WEBHOOK__URL` is set but no `renew_watch_channel_created`
   log line. Google can't reach your webhook.
 - Confirm from off-network: `curl -X POST -sv https://sn2md.<domain>/webhooks/drive`.
-  Expect 401 Unauthorized. Anything else (502, 504, cert error) means
+  Expect 200 OK (with `drive_webhook_unauthenticated` in container logs). Anything else (502, 504, cert error) means
   the reverse proxy is misrouted or TLS is broken.
-- Check your reverse proxy's access log for a 401 from Google — that
+- Check your reverse proxy's access log for 200 responses to Google POSTs (and `drive_webhook_notification` / `drive_webhook_unauthenticated` in container logs) — that
   proves reachability. If Google's POSTs never arrive, the DNS →
   reverse proxy → container path is broken.
 
@@ -586,7 +585,7 @@ docker logs sn2md-worker | jq .
   errored.
 - Immediate recovery: `docker restart sn2md-worker` — `ensure_active_channel_if_ready`
   creates a fresh channel on boot.
-- Follow-up: search logs for `renew_watch_channel_failed` in the last
+- Follow-up: search logs for `renew_watch_failed` in the last
   36 hours to see why the scheduled renewal failed.
 
 ### Notes aren't converting
