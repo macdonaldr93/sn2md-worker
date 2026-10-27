@@ -452,9 +452,69 @@ class TestWhenTheWorkflowCrashesMidNote:
             pages = page_conversions.list_for_note(session, "Notebooks/2026-07.note")
             record = conversions.get_by_logical_key(session, "Notebooks/2026-07.note")
         assert [p.page_index for p in pages] == [0, 1]
-        # AND — record stays PENDING so `_already_up_to_date` won't short-circuit.
+        # AND — record is marked ERROR with the exception message so `/status`
+        # surfaces the failure and `_already_up_to_date` won't short-circuit.
         assert record is not None
-        assert record.last_status == ConversionStatus.PENDING
+        assert record.last_status == ConversionStatus.ERROR
+        assert record.last_error == "gemini blew up on page 3"
+        assert record.source_md5 is None
+        assert record.attempts == 1
+
+    def test_preserves_prior_source_md5_and_does_not_double_increment_attempts(
+        self, engine: Engine, settings: Settings, source: MagicMock
+    ) -> None:
+        # GIVEN — a previously successful conversion with md5="old-md5" (attempts=1)
+        _seed_conversion(engine, file_id="file-1", md5="old-md5")
+        source.get_metadata.return_value = _file_metadata(md5Checksum="new-md5")
+        _stub_download(source)
+
+        # WHEN — reconverting the updated note fails mid-run
+        with (
+            patch(
+                "sn2md_worker.workflows.convert_note.run_multi_page",
+                side_effect=RuntimeError("gemini quota exceeded"),
+            ),
+            pytest.raises(RuntimeError, match="gemini quota exceeded"),
+        ):
+            convert_note_impl(
+                file_id="file-1",
+                source_path="Notebooks/2026-07.note",
+                source=source,
+                settings=settings,
+            )
+
+        # THEN — prior source_md5 is preserved, status is ERROR, and attempts is 2
+        with Session(engine) as session:
+            record = conversions.get_by_logical_key(session, "Notebooks/2026-07.note")
+        assert record is not None
+        assert record.last_status == ConversionStatus.ERROR
+        assert record.last_error == "gemini quota exceeded"
+        assert record.source_md5 == "old-md5"
+        assert record.attempts == 2
+
+    def test_records_failure_when_get_metadata_raises_before_pending_start(
+        self, engine: Engine, settings: Settings, source: MagicMock
+    ) -> None:
+        # GIVEN — source.get_metadata fails before _persist_pending_start runs
+        source.get_metadata.side_effect = RuntimeError("drive unavailable")
+
+        # WHEN
+        with pytest.raises(RuntimeError, match="drive unavailable"):
+            convert_note_impl(
+                file_id="file-1",
+                source_path="Notebooks/2026-07.note",
+                source=source,
+                settings=settings,
+            )
+
+        # THEN — failure is recorded with fallback source_name from logical_key
+        with Session(engine) as session:
+            record = conversions.get_by_logical_key(session, "Notebooks/2026-07.note")
+        assert record is not None
+        assert record.last_status == ConversionStatus.ERROR
+        assert record.last_error == "drive unavailable"
+        assert record.source_name == "2026-07.note"
+        assert record.attempts == 1
 
 
 class TestPendingRecordWrittenBeforeMultiPageRuns:

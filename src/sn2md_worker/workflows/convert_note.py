@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import tempfile
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import structlog
 from dbos import DBOS
@@ -25,6 +25,7 @@ from sn2md_worker.correlation import new_correlation_id
 from sn2md_worker.db import sql_session
 from sn2md_worker.drive.client import get_drive_client
 from sn2md_worker.logging import get_logger
+from sn2md_worker.sources.models import NoteMetadata
 from sn2md_worker.sources.protocol import NoteSource
 from sn2md_worker.state import conversions, page_conversions
 from sn2md_worker.state.conversions import ConversionUpsert
@@ -81,6 +82,7 @@ def convert_note_impl(
         # Lock before the up-to-date check so two workers can't both
         # observe "stale" and both re-run.
         with lock_for(key):
+            meta: NoteMetadata | None = None
             try:
                 meta = source.get_metadata(file_id)
                 if meta.trashed:
@@ -103,7 +105,6 @@ def convert_note_impl(
                     file_id=file_id,
                     parent_folder_id=parent_folder_id,
                     meta_name=meta.name,
-                    meta_md5=meta.md5_checksum,
                     source_path=source_path,
                     now=now,
                 )
@@ -133,6 +134,7 @@ def convert_note_impl(
                     key=key,
                     result=result,
                     now=now,
+                    source_md5=meta.md5_checksum,
                     output_dir=output_dir,
                     note_basename=Path(meta.name).stem,
                 )
@@ -144,6 +146,14 @@ def convert_note_impl(
                     cache_hits=result.cache_hits,
                 )
             except Exception as exc:
+                _persist_failure(
+                    key=key,
+                    file_id=file_id,
+                    source_name=meta.name if meta is not None else PurePosixPath(key).name,
+                    source_path=source_path,
+                    error=str(exc),
+                    when=datetime.now(UTC),
+                )
                 _log.error("convert_note_failed", error=str(exc), exc_info=True)
                 raise
 
@@ -172,7 +182,6 @@ def _persist_pending_start(
     file_id: str,
     parent_folder_id: str | None,
     meta_name: str,
-    meta_md5: str | None,
     source_path: str,
     now: datetime,
 ) -> None:
@@ -185,11 +194,32 @@ def _persist_pending_start(
                 parent_folder_id=parent_folder_id,
                 source_name=meta_name,
                 source_path=source_path,
-                source_md5=meta_md5,
+                source_md5=None,
                 output_rel_path=output_rel_path(source_path),
                 last_converted_at=now,
                 status=ConversionStatus.PENDING,
             ),
+        )
+
+
+def _persist_failure(
+    *,
+    key: str,
+    file_id: str,
+    source_name: str,
+    source_path: str,
+    error: str,
+    when: datetime,
+) -> None:
+    with sql_session() as session, session.begin():
+        conversions.record_failure(
+            session,
+            logical_key=key,
+            current_file_id=file_id,
+            source_name=source_name,
+            source_path=source_path,
+            error=error,
+            when=when,
         )
 
 
@@ -212,12 +242,13 @@ def _persist_finalize(
     key: str,
     result: MultiPageResult,
     now: datetime,
+    source_md5: str | None,
     output_dir: Path,
     note_basename: str,
 ) -> None:
     with sql_session() as session, session.begin():
         # UPDATE (not upsert) so `attempts` from PENDING isn't double-counted.
-        conversions.mark_success(session, logical_key=key, when=now)
+        conversions.mark_success(session, logical_key=key, when=now, source_md5=source_md5)
         page_conversions.delete_pages_at_or_beyond(
             session, logical_key=key, page_index=len(result.pages)
         )

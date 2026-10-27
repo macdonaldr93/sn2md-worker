@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import case, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -83,20 +83,22 @@ def upsert(session: Session, data: ConversionUpsert) -> None:
         last_error=data.last_error,
     )
     row = ConversionRecord.__table__.c
+    update_set: dict[str, object] = {
+        "current_file_id": stmt.excluded.current_file_id,
+        "parent_folder_id": stmt.excluded.parent_folder_id,
+        "source_name": stmt.excluded.source_name,
+        "source_path": stmt.excluded.source_path,
+        "output_rel_path": stmt.excluded.output_rel_path,
+        "last_status": stmt.excluded.last_status,
+        "attempts": row.attempts + 1,
+        "last_error": stmt.excluded.last_error,
+    }
+    if data.status != ConversionStatus.PENDING:
+        update_set["source_md5"] = stmt.excluded.source_md5
+        update_set["last_converted_at"] = stmt.excluded.last_converted_at
     stmt = stmt.on_conflict_do_update(
         index_elements=[ConversionRecord.logical_key],
-        set_={
-            "current_file_id": stmt.excluded.current_file_id,
-            "parent_folder_id": stmt.excluded.parent_folder_id,
-            "source_name": stmt.excluded.source_name,
-            "source_path": stmt.excluded.source_path,
-            "source_md5": stmt.excluded.source_md5,
-            "output_rel_path": stmt.excluded.output_rel_path,
-            "last_status": stmt.excluded.last_status,
-            "last_converted_at": stmt.excluded.last_converted_at,
-            "attempts": row.attempts + 1,
-            "last_error": stmt.excluded.last_error,
-        },
+        set_=update_set,
     )
     session.execute(stmt)
 
@@ -116,7 +118,8 @@ def record_failure(
     Atomic on `logical_key`. On conflict, preserves `parent_folder_id`,
     `source_md5`, `output_rel_path`, and `last_converted_at` (all
     populated by prior successful runs); only updates identity/error
-    fields and increments `attempts`.
+    fields and increments `attempts` unless the row was already marked
+    `PENDING` for the current attempt.
     """
     stmt = sqlite_insert(ConversionRecord).values(
         logical_key=logical_key,
@@ -139,24 +142,34 @@ def record_failure(
             "source_name": stmt.excluded.source_name,
             "source_path": stmt.excluded.source_path,
             "last_status": stmt.excluded.last_status,
-            "attempts": row.attempts + 1,
+            "attempts": case(
+                (row.last_status == ConversionStatus.PENDING, row.attempts),
+                else_=row.attempts + 1,
+            ),
             "last_error": stmt.excluded.last_error,
         },
     )
     session.execute(stmt)
 
 
-def mark_success(session: Session, *, logical_key: str, when: datetime) -> None:
+def mark_success(
+    session: Session,
+    *,
+    logical_key: str,
+    when: datetime,
+    source_md5: str | None = None,
+) -> None:
     """Flip PENDING → SUCCESS without touching `attempts` (a second upsert
     would double-count it). No-op if the row doesn't exist."""
+    values: dict[str, object] = {
+        "last_status": ConversionStatus.SUCCESS,
+        "last_converted_at": when,
+        "last_error": None,
+    }
+    if source_md5 is not None:
+        values["source_md5"] = source_md5
     session.execute(
-        update(ConversionRecord)
-        .where(ConversionRecord.logical_key == logical_key)
-        .values(
-            last_status=ConversionStatus.SUCCESS,
-            last_converted_at=when,
-            last_error=None,
-        )
+        update(ConversionRecord).where(ConversionRecord.logical_key == logical_key).values(**values)
     )
 
 
