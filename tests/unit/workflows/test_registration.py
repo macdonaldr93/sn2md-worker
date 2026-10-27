@@ -94,6 +94,45 @@ class TestRegisterSchedulesWhenSchedulesAlreadyExist:
         create_sched.assert_not_called()
 
 
+class TestRegisterSchedulesWhenScheduleCronChanges:
+    def test_deletes_and_recreates_schedule_whose_cron_differs_from_settings(
+        self, settings: Settings
+    ) -> None:
+        # GIVEN — renew-watch-channel and backfill-sweep match their crons,
+        # but fallback-poll-changes has an older cron persisted in DBOS
+        def existing(schedule_name: str) -> dict[str, str]:
+            crons = {
+                RENEW_SCHEDULE_NAME: RENEW_SCHEDULE_CRON,
+                FALLBACK_POLL_SCHEDULE_NAME: "*/15 * * * *",  # stale cron != FALLBACK_CRON
+                BACKFILL_SWEEP_SCHEDULE_NAME: BACKFILL_SWEEP_CRON,
+            }
+            return {"schedule_name": schedule_name, "schedule": crons[schedule_name]}
+
+        with (
+            patch(
+                "sn2md_worker.workflows.DBOS.get_schedule",
+                side_effect=existing,
+            ),
+            patch(
+                "sn2md_worker.workflows.DBOS.delete_schedule",
+            ) as delete_sched,
+            patch(
+                "sn2md_worker.workflows.DBOS.create_schedule",
+            ) as create_sched,
+        ):
+            # WHEN
+            register_schedules()
+
+        # THEN — only the changed schedule is deleted and recreated with the new cron
+        delete_sched.assert_called_once_with(FALLBACK_POLL_SCHEDULE_NAME)
+        create_sched.assert_called_once_with(
+            schedule_name=FALLBACK_POLL_SCHEDULE_NAME,
+            workflow_fn=scheduled_poll_changes,
+            schedule=FALLBACK_CRON,
+            context="cron",
+        )
+
+
 class TestRegisterSchedulesWhenOnlyFallbackPollIsMissing:
     def test_creates_only_the_missing_fallback_schedule(self, settings: Settings) -> None:
         # GIVEN - every schedule row exists except the fallback poll

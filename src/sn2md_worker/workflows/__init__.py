@@ -95,8 +95,8 @@ def register_schedules() -> None:
     a second boot on the same DB already has our rows. We pre-check via
     `DBOS.get_schedule` rather than catching a substring on `DBOSException`
     so a DBOS message-format change doesn't turn benign re-registration
-    into a boot failure. Changing a cron requires deleting the row
-    (or nuking the SQLite file).
+    into a boot failure. If a persisted schedule's cron differs from the
+    configured cron, the existing schedule is deleted and recreated.
     """
     settings = get_settings()
     _register_schedule(RENEW_SCHEDULE_NAME, renew_watch_channel, RENEW_SCHEDULE_CRON)
@@ -113,9 +113,19 @@ def register_schedules() -> None:
 
 
 def _register_schedule(schedule_name: str, workflow_fn: Callable[..., None], schedule: str) -> None:
-    if DBOS.get_schedule(schedule_name) is not None:
-        _log.info("schedule_already_registered", schedule_name=schedule_name)
-        return
+    existing = DBOS.get_schedule(schedule_name)
+    if existing is not None:
+        existing_cron = existing.get("schedule")
+        if existing_cron is None or existing_cron == schedule:
+            _log.info("schedule_already_registered", schedule_name=schedule_name)
+            return
+        DBOS.delete_schedule(schedule_name)
+        _log.info(
+            "schedule_updated",
+            schedule_name=schedule_name,
+            old_schedule=existing_cron,
+            new_schedule=schedule,
+        )
     DBOS.create_schedule(
         schedule_name=schedule_name,
         workflow_fn=workflow_fn,
