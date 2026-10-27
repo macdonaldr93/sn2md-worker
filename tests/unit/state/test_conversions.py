@@ -59,6 +59,35 @@ class TestUpsertOfAnExistingRecord:
         assert record.source_md5 == "def456"
         assert record.attempts == 2
 
+    def test_pending_upsert_preserves_prior_source_md5_and_last_converted_at(
+        self, session: Session
+    ) -> None:
+        # GIVEN — an existing successful conversion
+        conversions.upsert(session, _make_upsert(source_md5="good-md5", last_converted_at=NOW))
+        session.flush()
+
+        # WHEN — a subsequent run marks the record PENDING before finishing
+        later = datetime(2026, 7, 5, 15, 30, tzinfo=UTC)
+        conversions.upsert(
+            session,
+            _make_upsert(
+                current_file_id="file-2",
+                source_md5=None,
+                last_converted_at=later,
+                status=ConversionStatus.PENDING,
+            ),
+        )
+        session.flush()
+
+        # THEN — prior checksum and timestamp survive while status flips to PENDING
+        record = conversions.get_by_logical_key(session, LOGICAL_KEY)
+        assert record is not None
+        assert record.current_file_id == "file-2"
+        assert record.last_status == ConversionStatus.PENDING
+        assert record.source_md5 == "good-md5"
+        assert record.last_converted_at == NOW
+        assert record.attempts == 2
+
 
 class TestGetByCurrentFileId:
     def test_returns_the_matching_record_when_the_file_id_is_active(self, session: Session) -> None:
@@ -107,12 +136,14 @@ class TestMarkSuccess:
         self, session: Session
     ) -> None:
         # GIVEN
-        conversions.upsert(session, _make_upsert(status=ConversionStatus.PENDING))
+        conversions.upsert(session, _make_upsert(source_md5=None, status=ConversionStatus.PENDING))
         session.flush()
 
         # WHEN
         later = datetime(2026, 7, 5, 15, 30, tzinfo=UTC)
-        conversions.mark_success(session, logical_key=LOGICAL_KEY, when=later)
+        conversions.mark_success(
+            session, logical_key=LOGICAL_KEY, when=later, source_md5="final-md5"
+        )
         session.flush()
 
         # THEN — attempts stays at 1 (double-upsert would have made it 2).
@@ -120,6 +151,7 @@ class TestMarkSuccess:
         assert record is not None
         assert record.last_status == ConversionStatus.SUCCESS
         assert record.last_converted_at == later
+        assert record.source_md5 == "final-md5"
         assert record.attempts == 1
         assert record.last_error is None
 
@@ -201,3 +233,29 @@ class TestRecordFailureOnAnExistingSuccessfulRecord:
         assert record.source_md5 == "original-md5"
         assert record.output_rel_path == "Notebooks/Journal/2026-07"
         assert record.attempts == 2
+
+    def test_does_not_double_increment_attempts_when_record_is_already_pending(
+        self, session: Session
+    ) -> None:
+        # GIVEN — a record that was marked PENDING at the start of an attempt
+        conversions.upsert(session, _make_upsert(source_md5=None, status=ConversionStatus.PENDING))
+        session.flush()
+
+        # WHEN — that attempt fails and records the failure
+        conversions.record_failure(
+            session,
+            logical_key=LOGICAL_KEY,
+            current_file_id="file-1",
+            source_name="2026-07.note",
+            source_path=LOGICAL_KEY,
+            error="gemini timeout",
+            when=NOW,
+        )
+        session.flush()
+
+        # THEN — attempts remains 1 for the single failed attempt
+        record = conversions.get_by_logical_key(session, LOGICAL_KEY)
+        assert record is not None
+        assert record.last_status == ConversionStatus.ERROR
+        assert record.last_error == "gemini timeout"
+        assert record.attempts == 1
