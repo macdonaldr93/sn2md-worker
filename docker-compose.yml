@@ -39,7 +39,7 @@ services:
         - CMD
         - python
         - "-c"
-        - "import sys, urllib.request as u; sys.exit(0 if u.urlopen('http://localhost:8080/healthz').status==200 else 1)"
+        - "import sys, urllib.request as u; sys.exit(0 if u.urlopen('http://localhost:8080/healthz', timeout=3).status==200 else 1)"
       interval: 30s
       timeout: 5s
       retries: 3
