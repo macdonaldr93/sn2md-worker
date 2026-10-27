@@ -121,7 +121,7 @@ sn2md-worker/
 ├── docker/
 │   ├── entrypoint.sh               # linuxserver-style PUID/PGID/TZ/UMASK handling
 │   └── obsidian-sync/              # companion sync image: Dockerfile + entrypoint.sh (see §10)
-├── Dockerfile                      # python:3.11-slim + gosu + tzdata + uv sync
+├── Dockerfile                      # python:3.12-slim + gosu + tzdata + uv sync
 ├── docker-compose.yml              # reference for local + Unraid
 ├── config.example.toml
 ├── .env.example
@@ -147,7 +147,7 @@ sn2md-worker/
 | Testing            | `pytest`, `pytest-asyncio`                | current          |
 | Quality            | `ruff`, `mypy`, `pre-commit`              | current          |
 
-Python version pinned to **3.11** (sn2md's floor).
+Python version pinned to **3.12**.
 
 ## 4a. Supernote sync semantics (empirical, 2026-07-04)
 
@@ -759,7 +759,7 @@ The image boots without any external config; you can add a
 
 Canonical files:
 
-- [`Dockerfile`](../Dockerfile) — `python:3.11-slim`, uv-managed venv at
+- [`Dockerfile`](../Dockerfile) — `python:3.12-slim`, uv-managed venv at
   `/app/.venv`, gosu + tzdata installed, non-root `app` user. Root
   ENTRYPOINT drops to `app` after PUID/PGID reshape.
 - [`docker/entrypoint.sh`](../docker/entrypoint.sh) — linuxserver-style:
