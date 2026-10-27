@@ -294,12 +294,22 @@ class DriveClient:
         stack: list[tuple[str, str]] = [(folder_id, "")]
         while stack:
             current_id, current_path = stack.pop()
-            for child in self._list_children(current_id):
-                child_path = f"{current_path}/{child.name}" if current_path else child.name
-                if child.mime_type == DRIVE_FOLDER_MIME:
-                    stack.append((child.id, child_path))
-                elif child.name.lower().endswith(_NOTE_EXTENSION) and not child.trashed:
-                    yield ListedNote(metadata=child, source_path=child_path)
+            try:
+                for child in self._list_children(current_id):
+                    child_path = f"{current_path}/{child.name}" if current_path else child.name
+                    if child.mime_type == DRIVE_FOLDER_MIME:
+                        stack.append((child.id, child_path))
+                    elif child.name.lower().endswith(_NOTE_EXTENSION) and not child.trashed:
+                        yield ListedNote(metadata=child, source_path=child_path)
+            except DrivePermanentError as exc:
+                if not current_path:
+                    raise
+                _log.warning(
+                    "drive_list_subfolder_permanent_error",
+                    folder_id=current_id,
+                    folder_path=current_path,
+                    error=str(exc),
+                )
 
     def find_live_note(self, parent_folder_id: str, name: str) -> NoteMetadata | None:
         """Return a live (non-trashed) file in the given folder matching `name`.

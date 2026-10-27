@@ -26,7 +26,7 @@ from sn2md_worker.db import sql_session
 from sn2md_worker.drive.client import get_drive_client
 from sn2md_worker.logging import get_logger
 from sn2md_worker.sources.models import NoteMetadata
-from sn2md_worker.sources.protocol import NoteSource
+from sn2md_worker.sources.protocol import NoteSource, SourcePermanentError
 from sn2md_worker.state import conversions, page_conversions
 from sn2md_worker.state.conversions import ConversionUpsert
 from sn2md_worker.state.models import ConversionStatus
@@ -98,19 +98,19 @@ def convert_note_impl(
                 parent_folder_id = meta.parents[0] if meta.parents else None
                 output_dir = note_output_dir(source_path, settings.vault.root_path)
 
-                # PENDING before the loop → crash-visible to delete_output
-                # and refused as up-to-date by a retry.
-                _persist_pending_start(
-                    key=key,
-                    file_id=file_id,
-                    parent_folder_id=parent_folder_id,
-                    meta_name=meta.name,
-                    source_path=source_path,
-                    now=now,
-                )
-
                 with tempfile.TemporaryDirectory(prefix="sn2md-worker-") as tmp_root:
                     note_path = source.download(file_id, Path(tmp_root), meta.name)
+
+                    # PENDING before the loop → crash-visible to delete_output
+                    # and refused as up-to-date by a retry.
+                    _persist_pending_start(
+                        key=key,
+                        file_id=file_id,
+                        parent_folder_id=parent_folder_id,
+                        meta_name=meta.name,
+                        source_path=source_path,
+                        now=now,
+                    )
 
                     _log.info(
                         "convert_note_running_multi_page",
@@ -145,6 +145,13 @@ def convert_note_impl(
                     gemini_calls=result.gemini_calls,
                     cache_hits=result.cache_hits,
                 )
+            except SourcePermanentError as exc:
+                _log.warning(
+                    "convert_note_skipped",
+                    reason="source_permanent_error",
+                    error=str(exc),
+                )
+                return
             except Exception as exc:
                 _persist_failure(
                     key=key,

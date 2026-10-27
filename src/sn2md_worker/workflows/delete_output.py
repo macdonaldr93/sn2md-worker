@@ -11,7 +11,7 @@ from sn2md_worker.correlation import new_correlation_id
 from sn2md_worker.db import sql_session
 from sn2md_worker.drive.client import get_drive_client
 from sn2md_worker.logging import get_logger
-from sn2md_worker.sources.protocol import NoteSource
+from sn2md_worker.sources.protocol import NoteSource, SourcePermanentError
 from sn2md_worker.state import conversions, page_conversions
 from sn2md_worker.workflows.convert_note import convert_note
 from sn2md_worker.workflows.locks import lock_for
@@ -71,7 +71,15 @@ def delete_output_impl(
                     return
 
                 if record.parent_folder_id:
-                    live = source.find_live_note(record.parent_folder_id, record.source_name)
+                    try:
+                        live = source.find_live_note(record.parent_folder_id, record.source_name)
+                    except SourcePermanentError as exc:
+                        _log.warning(
+                            "delete_output_live_lookup_permanent_error",
+                            parent_folder_id=record.parent_folder_id,
+                            error=str(exc),
+                        )
+                        live = None
                     if live is not None and live.id != file_id:
                         _repoint(logical_key=record.logical_key, new_file_id=live.id)
                         # Guards against a delete-side push without a
