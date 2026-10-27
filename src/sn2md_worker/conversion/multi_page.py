@@ -173,7 +173,7 @@ def run_multi_page(
             if cached_body is None:
                 _write_bytes_if_changed(page_png, page_bytes)
                 _write_text_if_changed(page_md, rendered)
-            previous_markdown = rendered
+            previous_markdown = body
 
             outcome = PageOutcome(
                 page_index=page_index,
