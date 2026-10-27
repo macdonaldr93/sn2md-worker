@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.12"
 # dependencies = [
 #   "sn2md>=2.7.0",
 #   "llm-gemini>=0.32",

@@ -1,5 +1,5 @@
 # /// script
-# requires-python = ">=3.11"
+# requires-python = ">=3.12"
 # dependencies = [
 #   "google-api-python-client>=2.150.0",
 #   "google-auth>=2.35.0",

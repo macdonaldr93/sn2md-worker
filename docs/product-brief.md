@@ -32,7 +32,7 @@ Runs continuously as a Docker container on my Unraid server.
 
 ### Language & tooling
 
-- **Language**: Python 3.11+ (sn2md's floor). Drives sn2md's per-page
+- **Language**: Python 3.12+. Drives sn2md's per-page
   primitives (`NotebookExtractor.extract_images`, `image_to_markdown`)
   from `conversion/multi_page.py` so we can cache per-page LLM output.
 - **Packaging**: `uv` for venv, dependencies, lockfile, and runners.
