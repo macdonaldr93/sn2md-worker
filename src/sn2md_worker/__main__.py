@@ -25,6 +25,8 @@ from sn2md_worker.logging import configure_logging, get_logger
 from sn2md_worker.startup_status import BootStepResult, StartupStatus, set_startup_status
 from sn2md_worker.state import init_schema
 
+DBOS_APPLICATION_VERSION = "1"
+
 
 def main() -> int:
     settings = load_settings()
@@ -70,6 +72,8 @@ def main() -> int:
 
     DBOS.launch()
     log.info("dbos_launched")
+
+    workflows.cancel_stale_version_workflows()
 
     # register_queue needs a launched DBOS; a webhook that arrives in the
     # micro-window before this point will fail to enqueue, and Google will
@@ -148,9 +152,15 @@ def _run_boot_step(
 
 
 def _dbos_config(settings: Settings) -> DBOSConfig:
+    # Pin `application_version` instead of letting DBOS hash workflow
+    # source + dbos_version on each deploy. Without blue/green deploys,
+    # an auto-computed version change leaves `ENQUEUED`/`PENDING` rows
+    # from the previous image stranded in `workflow_status` holding
+    # their `deduplication_id` locks forever.
     config = DBOSConfig(
         name="sn2md-worker",
         system_database_url=settings.database.url,
+        application_version=DBOS_APPLICATION_VERSION,
     )
     # DBOS's internal SystemDatabase / ApplicationDatabase engines don't
     # set `check_same_thread=False` by default (see .venv .../dbos/

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import ssl
 import threading
 from collections.abc import Iterator, Sequence
@@ -8,12 +9,11 @@ from pathlib import Path
 from typing import Any
 
 import google_auth_httplib2
-import httplib2
 from google.auth.exceptions import GoogleAuthError
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import HttpRequest, MediaIoBaseDownload
+from googleapiclient.http import HttpRequest, MediaIoBaseDownload, build_http
 from httplib2 import ServerNotFoundError
 from tenacity import (
     RetryCallState,
@@ -464,7 +464,12 @@ class DriveClient:
     def _get_http(self) -> Any:
         http = getattr(self._thread_local, "http", None)
         if http is None:
-            http = google_auth_httplib2.AuthorizedHttp(self._credentials, http=httplib2.Http())
+            creds = (
+                self._credentials.with_scopes(self._credentials.scopes)
+                if isinstance(self._credentials, service_account.Credentials)
+                else copy.copy(self._credentials)
+            )
+            http = google_auth_httplib2.AuthorizedHttp(creds, http=build_http())
             self._thread_local.http = http
         return http
 

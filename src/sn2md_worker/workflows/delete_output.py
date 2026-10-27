@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 
 import structlog
-from dbos import DBOS, SetEnqueueOptions
+from dbos import DBOS
 from dbos._error import DBOSQueueDeduplicatedError
 
 from sn2md_worker.config import Settings, get_settings
@@ -21,7 +21,7 @@ from sn2md_worker.sources.protocol import (
 from sn2md_worker.state import conversions, page_conversions
 from sn2md_worker.workflows.convert_note import convert_note
 from sn2md_worker.workflows.locks import lock_for
-from sn2md_worker.workflows.queues import CONVERT_QUEUE_NAME
+from sn2md_worker.workflows.queues import CONVERT_QUEUE_NAME, detached_enqueue
 
 __all__ = ["delete_output", "delete_output_impl"]
 
@@ -100,7 +100,7 @@ def delete_output_impl(
                         # Guards against a delete-side push without a
                         # matching create-side push.
                         try:
-                            with SetEnqueueOptions(
+                            with detached_enqueue(
                                 deduplication_id=f"{live.id}:{record.source_path}"
                             ):
                                 DBOS.enqueue_workflow(

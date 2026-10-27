@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from sn2md_worker.state.models import DriveChangeCursor
 
-__all__ = ["CursorView", "get", "set_cursor"]
+__all__ = ["CursorView", "get", "seed_if_empty", "set_cursor"]
 
 _SINGLETON_ID = 1
 
@@ -43,3 +43,19 @@ def set_cursor(session: Session, page_token: str, when: datetime) -> None:
         },
     )
     session.execute(stmt)
+
+
+def seed_if_empty(session: Session, page_token: str, when: datetime) -> str:
+    """Insert the singleton cursor only if no row exists yet; return the persisted token."""
+    stmt = (
+        sqlite_insert(DriveChangeCursor)
+        .values(
+            id=_SINGLETON_ID,
+            page_token=page_token,
+            last_polled_at=when,
+        )
+        .on_conflict_do_nothing(index_elements=[DriveChangeCursor.id])
+    )
+    session.execute(stmt)
+    record = session.get(DriveChangeCursor, _SINGLETON_ID, populate_existing=True)
+    return record.page_token if record is not None else page_token

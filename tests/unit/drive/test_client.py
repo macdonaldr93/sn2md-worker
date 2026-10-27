@@ -405,6 +405,45 @@ class TestGetHttpIsPerThread:
             "different threads shared the same Http instance — not thread-safe"
         )
 
+    def test_configures_non_none_socket_timeout_via_build_http(self) -> None:
+        # GIVEN — a DriveClient instance
+        service = MagicMock()
+        drive = _drive_client_with_service(service)
+
+        # WHEN
+        http = drive._get_http()
+
+        # THEN — underlying httplib2.Http has a finite socket timeout configured
+        # (bare httplib2.Http() defaults to timeout=None, which hangs forever)
+        assert http.http.timeout is not None
+        assert http.http.timeout > 0
+
+    def test_each_thread_gets_a_distinct_credentials_copy(self) -> None:
+        # GIVEN — a DriveClient whose _credentials is shared across worker threads
+        service = MagicMock()
+        drive = _drive_client_with_service(service)
+        drive._credentials = object()
+
+        # WHEN — two threads initialize their thread-local AuthorizedHttp
+        creds_ids: list[int] = []
+
+        def grab_creds_id() -> None:
+            creds_ids.append(id(drive._get_http().credentials))
+
+        t1 = threading.Thread(target=grab_creds_id)
+        t2 = threading.Thread(target=grab_creds_id)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        # THEN — neither thread shares the root credentials instance or the
+        # other thread's credentials instance
+        assert len(creds_ids) == 2
+        assert creds_ids[0] != creds_ids[1]
+        assert creds_ids[0] != id(drive._credentials)
+        assert creds_ids[1] != id(drive._credentials)
+
 
 class TestDriveClientConstructorWrapsMalformedKey:
     def test_malformed_json_surfaces_as_drive_client_error(self, tmp_path: Path) -> None:

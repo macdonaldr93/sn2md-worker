@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from dbos._context import get_local_dbos_context
+from dbos._context import DBOSContext, _dbos_context_var, get_local_dbos_context
 from dbos._error import DBOSQueueDeduplicatedError
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
@@ -402,3 +402,48 @@ class TestWhenFindLiveNoteRaisesSourcePermanentError:
         assert note_dir.exists()
         with Session(engine) as session:
             assert conversions.get_by_logical_key(session, LOGICAL_KEY) is not None
+
+
+class TestRepointConvertEnqueueDetachesFromParentWorkflow:
+    def test_detaches_from_parent_workflow_context_when_repointing_to_live_twin(
+        self, engine: Engine, settings: Settings, source: MagicMock, vault_root: Path
+    ) -> None:
+        # GIVEN — a live twin with a different md5 exists in Drive while
+        # delete_output_impl runs inside a parent DBOS workflow context
+        _seed_record(engine, file_id="old-file", parent_folder_id="parent-1")
+        _seed_output_dir(vault_root)
+        source.find_live_note.return_value = NoteMetadata(
+            id="new-file",
+            name="2026-07.note",
+            parents=("parent-1",),
+            md5_checksum="new-md5",
+        )
+        parent_ctx = DBOSContext()
+        parent_ctx.workflow_id = "parent-delete-wf"
+        observed_in_workflow: list[bool] = []
+        observed_dedup_ids: list[str | None] = []
+
+        def inspect_ctx(*_args: object, **_kwargs: object) -> None:
+            ctx = get_local_dbos_context()
+            observed_in_workflow.append(ctx.is_within_workflow() if ctx is not None else False)
+            observed_dedup_ids.append(ctx.deduplication_id if ctx is not None else None)
+
+        # WHEN
+        token = _dbos_context_var.set(parent_ctx)
+        try:
+            with patch(
+                "sn2md_worker.workflows.delete_output.DBOS.enqueue_workflow",
+                side_effect=inspect_ctx,
+            ):
+                delete_output_impl(file_id="old-file", source=source, settings=settings)
+                restored = get_local_dbos_context()
+        finally:
+            _dbos_context_var.reset(token)
+
+        # THEN — enqueue ran outside parent workflow context with deduplication_id set,
+        # and parent_ctx was restored untouched
+        assert observed_in_workflow == [False]
+        assert observed_dedup_ids == [f"new-file:{LOGICAL_KEY}"]
+        assert restored is parent_ctx
+        assert parent_ctx.workflow_id == "parent-delete-wf"
+        assert parent_ctx.function_id == -1

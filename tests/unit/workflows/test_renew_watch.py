@@ -16,6 +16,7 @@ from sn2md_worker.drive.models import ChannelInfo
 from sn2md_worker.state import cursor, watch_channels
 from sn2md_worker.state.models import Base
 from sn2md_worker.state.watch_channels import NewWatchChannel
+from sn2md_worker.workflows.locks import lock_for
 from sn2md_worker.workflows.poll_changes import poll_changes
 from sn2md_worker.workflows.queues import POLL_QUEUE_NAME
 from sn2md_worker.workflows.renew_watch import (
@@ -497,3 +498,51 @@ class TestEnsureActiveChannelWhenPreviousChannelHasExpired:
 
         # THEN — no recovery poll enqueued (channel is fresh)
         enqueue.assert_not_called()
+
+
+class TestRenewWatchConcurrencyAndCursorSafety:
+    def test_acquires_watch_channel_lock_around_renewal(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — no active channel yet
+        with patch(
+            "sn2md_worker.workflows.renew_watch.lock_for",
+            wraps=lock_for,
+        ) as spy_lock:
+            # WHEN
+            renew_watch_channel_impl(
+                trigger_source="test",
+                drive=drive,
+                settings=settings,
+                now=NOW,
+            )
+
+        # THEN — the singleton watch-channel lock serialized the renewal
+        spy_lock.assert_called_once_with("__watch_channel__")
+
+    def test_does_not_overwrite_cursor_advanced_concurrently_during_start_page_token_fetch(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — cursor table starts empty, and while get_start_page_token()
+        # is in flight, a concurrent poll_changes writes a newer token "ADVANCED-50".
+        def race_start_token() -> str:
+            with Session(engine) as sess, sess.begin():
+                cursor.set_cursor(sess, "ADVANCED-50", NOW)
+            return "STALE-SEED-1"
+
+        drive.get_start_page_token.side_effect = race_start_token
+
+        # WHEN
+        renew_watch_channel_impl(
+            trigger_source="test",
+            drive=drive,
+            settings=settings,
+            now=NOW,
+        )
+
+        # THEN — the cursor remains "ADVANCED-50" and watch_changes used it
+        with Session(engine) as sess:
+            saved = cursor.get(sess)
+        assert saved is not None
+        assert saved.page_token == "ADVANCED-50"
+        assert drive.watch_changes.call_args.kwargs["start_page_token"] == "ADVANCED-50"

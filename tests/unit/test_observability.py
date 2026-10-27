@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,6 +18,7 @@ from sn2md_worker.config import (
     set_settings,
 )
 from sn2md_worker.db import set_engine
+from sn2md_worker.observability import get_status, readyz
 from sn2md_worker.startup_status import StartupStatus, set_startup_status
 from sn2md_worker.state import conversions, cursor, watch_channels
 from sn2md_worker.state.conversions import ConversionUpsert
@@ -411,3 +413,13 @@ class TestStatusEndpoint:
             "backfill_enqueue": "ok",
             "last_error": "seed_cursor: Drive transport failure",
         }
+
+
+class TestDatabaseRoutesRunInThreadpool:
+    def test_readyz_and_status_are_sync_functions_so_fastapi_uses_threadpool(self) -> None:
+        # GIVEN / WHEN / THEN — routes that run synchronous SQLAlchemy
+        # queries must be defined with `def` (not `async def`) so FastAPI
+        # dispatches them to its worker threadpool instead of blocking the
+        # main asyncio event loop while SQLite waits on busy_timeout.
+        assert not inspect.iscoroutinefunction(readyz)
+        assert not inspect.iscoroutinefunction(get_status)

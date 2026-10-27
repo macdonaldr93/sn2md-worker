@@ -10,8 +10,10 @@ final error on exhaustion for the caller to wrap.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
+from llm.plugins import load_plugins
 from sn2md.ai_utils import image_to_markdown
 from tenacity import (
     RetryCallState,
@@ -24,6 +26,19 @@ from sn2md_worker.logging import get_logger
 __all__ = ["transcribe_page"]
 
 _log = get_logger("sn2md_worker.conversion.gemini")
+_PLUGIN_LOCK = threading.Lock()
+
+
+def _ensure_llm_plugins_loaded() -> None:
+    """Serialize llm's one-time plugin loading across worker threads.
+
+    `llm.plugins.load_plugins()` sets `_loaded = True` before finishing
+    `pm.load_setuptools_entrypoints("llm")`; without a lock, a second
+    worker thread calling `llm.get_model()` concurrently on first boot
+    can observe `_loaded == True` before `llm_gemini` is registered.
+    """
+    with _PLUGIN_LOCK:
+        load_plugins()  # type: ignore[no-untyped-call]
 
 
 def transcribe_page(
@@ -181,5 +196,6 @@ def _call_gemini_with_retry(
     Idempotent by construction — no side effects until the caller writes
     the returned markdown to disk — so retrying is always safe.
     """
+    _ensure_llm_plugins_loaded()
     result: str = image_to_markdown(str(png_path), context, api_key, model, prompt_template)
     return result

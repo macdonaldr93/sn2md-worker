@@ -4,7 +4,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 
 import structlog
-from dbos import DBOS, SetEnqueueOptions
+from dbos import DBOS
 from dbos._error import DBOSQueueDeduplicatedError
 
 from sn2md_worker.config import Settings, get_settings
@@ -23,6 +23,7 @@ from sn2md_worker.workflows.queues import (
     CONVERT_QUEUE_NAME,
     DELETE_QUEUE_NAME,
     POLL_QUEUE_NAME,
+    detached_enqueue,
 )
 
 __all__ = [
@@ -62,9 +63,10 @@ def scheduled_poll_changes(scheduled_time: datetime, context: str) -> None:
     Signature stays exactly `(scheduled_time, context)`: that is what
     `DBOS.create_schedule` invokes scheduled workflows with. Root
     trigger: a fresh correlation id is minted per cron tick."""
-    DBOS.enqueue_workflow(
-        POLL_QUEUE_NAME, poll_changes, POLL_TRIGGER_FALLBACK, new_correlation_id()
-    )
+    with detached_enqueue():
+        DBOS.enqueue_workflow(
+            POLL_QUEUE_NAME, poll_changes, POLL_TRIGGER_FALLBACK, new_correlation_id()
+        )
 
 
 def poll_changes_impl(
@@ -125,7 +127,8 @@ def poll_changes_impl(
                     )
                     new_token = drive.get_start_page_token()
                     _save_cursor(new_token)
-                    DBOS.enqueue_workflow(POLL_QUEUE_NAME, backfill, correlation_id)
+                    with detached_enqueue():
+                        DBOS.enqueue_workflow(POLL_QUEUE_NAME, backfill, correlation_id)
                     _log.info(
                         "poll_changes_recovery_enqueued",
                         new_cursor=new_token,
@@ -184,8 +187,9 @@ def seed_cursor(drive: DriveClient) -> None:
         if cursor.get(session) is not None:
             return
     token = drive.get_start_page_token()
-    _save_cursor(token)
-    _log.info("cursor_seeded", token=token)
+    with sql_session() as session, session.begin():
+        seeded = cursor.seed_if_empty(session, token, datetime.now(UTC))
+    _log.info("cursor_seeded", token=seeded)
 
 
 def _dispatch(
@@ -197,7 +201,8 @@ def _dispatch(
     """Enqueue convert_note (or delete_output) for eligible changes."""
     if change.removed or (change.file is not None and change.file.trashed):
         reason = "removed" if change.removed else "trashed"
-        DBOS.enqueue_workflow(DELETE_QUEUE_NAME, delete_output, change.file_id, correlation_id)
+        with detached_enqueue():
+            DBOS.enqueue_workflow(DELETE_QUEUE_NAME, delete_output, change.file_id, correlation_id)
         _log.info(
             "poll_changes_enqueued",
             file_id=change.file_id,
@@ -218,7 +223,8 @@ def _dispatch(
             existing = conversions.get_by_current_file_id(session, change.file_id)
         if existing is None:
             return False
-        DBOS.enqueue_workflow(DELETE_QUEUE_NAME, delete_output, change.file_id, correlation_id)
+        with detached_enqueue():
+            DBOS.enqueue_workflow(DELETE_QUEUE_NAME, delete_output, change.file_id, correlation_id)
         _log.info(
             "poll_changes_enqueued",
             file_id=change.file_id,
@@ -228,7 +234,7 @@ def _dispatch(
         return True
 
     try:
-        with SetEnqueueOptions(deduplication_id=f"{change.file_id}:{source_path}"):
+        with detached_enqueue(deduplication_id=f"{change.file_id}:{source_path}"):
             DBOS.enqueue_workflow(
                 CONVERT_QUEUE_NAME, convert_note, change.file_id, source_path, correlation_id
             )
@@ -254,8 +260,8 @@ def _load_or_init_cursor(drive: DriveClient) -> str:
         if record is not None:
             return record.page_token
     token = drive.get_start_page_token()
-    _save_cursor(token)
-    return token
+    with sql_session() as session, session.begin():
+        return cursor.seed_if_empty(session, token, datetime.now(UTC))
 
 
 def _save_cursor(page_token: str) -> None:

@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from dbos._context import get_local_dbos_context
+from dbos._context import DBOSContext, _dbos_context_var, get_local_dbos_context
 from dbos._error import DBOSQueueDeduplicatedError
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
@@ -670,3 +670,72 @@ class TestConvertNoteEnqueueDeduplication:
             saved = cursor.get(session)
         assert saved is not None
         assert saved.page_token == "10"
+
+    def test_detaches_from_parent_workflow_context_during_enqueue_and_restores_it_after(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — poll_changes_impl is executing inside a parent DBOS workflow
+        # context (which would otherwise bind child enqueues to positional
+        # `function_id` steps in `operation_outputs` and replay stale step
+        # outputs on recovery after SQLite cursor advancement).
+        drive.get_start_page_token.return_value = "1"
+        drive.changes_list.return_value = ChangesPage(
+            changes=(
+                _change("file-1", name="a.note"),
+                _removal("file-gone"),
+            ),
+            new_start_page_token="10",
+        )
+        drive.get_metadata.side_effect = lambda fid, fields=None: NoteMetadata(
+            id=fid, name=f"{fid}.note", parents=(SOURCE_FOLDER_ID,)
+        )
+
+        parent_ctx = DBOSContext()
+        parent_ctx.workflow_id = "parent-poll-wf"
+        observed_in_workflow: list[bool] = []
+
+        def inspect_ctx(*_args: object, **_kwargs: object) -> None:
+            ctx = get_local_dbos_context()
+            observed_in_workflow.append(ctx.is_within_workflow() if ctx is not None else False)
+
+        # WHEN
+        token = _dbos_context_var.set(parent_ctx)
+        try:
+            with patch(
+                "sn2md_worker.workflows.poll_changes.DBOS.enqueue_workflow",
+                side_effect=inspect_ctx,
+            ):
+                poll_changes_impl(trigger_source="test", drive=drive, settings=settings)
+                restored = get_local_dbos_context()
+        finally:
+            _dbos_context_var.reset(token)
+
+        # THEN — neither enqueue ran inside the parent workflow step context,
+        # and the parent context was restored untouched with function_id == -1
+        assert observed_in_workflow == [False, False]
+        assert restored is parent_ctx
+        assert parent_ctx.workflow_id == "parent-poll-wf"
+        assert parent_ctx.function_id == -1
+
+
+class TestCursorSeedingRaceSafety:
+    def test_seed_cursor_does_not_overwrite_cursor_written_during_drive_call(
+        self, engine: Engine, drive: MagicMock
+    ) -> None:
+        # GIVEN — cursor starts empty, and while get_start_page_token() is in
+        # flight, another workflow writes a newer cursor "ADVANCED-77".
+        def race_token() -> str:
+            with Session(engine) as sess, sess.begin():
+                cursor.set_cursor(sess, "ADVANCED-77", datetime(2026, 7, 4, tzinfo=UTC))
+            return "STALE-SEED-1"
+
+        drive.get_start_page_token.side_effect = race_token
+
+        # WHEN
+        seed_cursor(drive)
+
+        # THEN — the advanced cursor is preserved, not clobbered by STALE-SEED-1
+        with Session(engine) as sess:
+            saved = cursor.get(sess)
+        assert saved is not None
+        assert saved.page_token == "ADVANCED-77"

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -199,3 +202,40 @@ class TestWhenGeminiFailsForOtherReasons:
 
         # THEN: three attempts (initial + 2 retries), then reraised.
         assert fake_llm.call_count == 3
+
+
+class TestLlmPluginLoadingThreadSafety:
+    def test_serializes_concurrent_plugin_loading_across_threads(self) -> None:
+        # GIVEN — multiple convert_note workers calling transcribe_page
+        # concurrently when llm plugins have not yet been initialized.
+        in_flight = 0
+        max_concurrent = 0
+        state_lock = threading.Lock()
+
+        def slow_load_plugins() -> None:
+            nonlocal in_flight, max_concurrent
+            with state_lock:
+                in_flight += 1
+                max_concurrent = max(max_concurrent, in_flight)
+            time.sleep(0.02)
+            with state_lock:
+                in_flight -= 1
+
+        # WHEN — 4 threads call transcribe_page at the same time
+        with (
+            patch(
+                "sn2md_worker.conversion.gemini.load_plugins",
+                side_effect=slow_load_plugins,
+            ) as mock_load,
+            patch(
+                "sn2md_worker.conversion.gemini.image_to_markdown",
+                return_value="ok",
+            ),
+            ThreadPoolExecutor(max_workers=4) as pool,
+        ):
+            results = list(pool.map(lambda _: _transcribe_one_page(), range(4)))
+
+        # THEN — load_plugins never ran in more than 1 thread at a time
+        assert results == ["ok", "ok", "ok", "ok"]
+        assert mock_load.call_count == 4
+        assert max_concurrent == 1

@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from dbos._context import get_local_dbos_context
+from dbos._context import DBOSContext, _dbos_context_var, get_local_dbos_context
 from dbos._error import DBOSQueueDeduplicatedError
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
@@ -355,3 +355,40 @@ class TestBackfillConvertEnqueueDeduplication:
             "f1:Notebooks/2026-07.note",
             "f2:Notebooks/2026-08.note",
         ]
+
+    def test_detaches_from_parent_workflow_context_during_enqueue_and_restores_it_after(
+        self, engine: Engine, settings: Settings, source: MagicMock
+    ) -> None:
+        # GIVEN — backfill_impl runs inside a parent DBOS workflow context
+        source.list_all_notes.return_value = iter(
+            [_listed("f1", "Notebooks/2026-07.note", name="2026-07.note")]
+        )
+        parent_ctx = DBOSContext()
+        parent_ctx.workflow_id = "parent-backfill-wf"
+        observed_in_workflow: list[bool] = []
+        observed_dedup_ids: list[str | None] = []
+
+        def inspect_ctx(*_args: object, **_kwargs: object) -> None:
+            ctx = get_local_dbos_context()
+            observed_in_workflow.append(ctx.is_within_workflow() if ctx is not None else False)
+            observed_dedup_ids.append(ctx.deduplication_id if ctx is not None else None)
+
+        # WHEN
+        token = _dbos_context_var.set(parent_ctx)
+        try:
+            with patch(
+                "sn2md_worker.workflows.backfill.DBOS.enqueue_workflow",
+                side_effect=inspect_ctx,
+            ):
+                backfill_impl(source=source, settings=settings)
+                restored = get_local_dbos_context()
+        finally:
+            _dbos_context_var.reset(token)
+
+        # THEN — enqueue ran outside parent workflow context with deduplication_id set,
+        # and parent_ctx was restored untouched
+        assert observed_in_workflow == [False]
+        assert observed_dedup_ids == ["f1:Notebooks/2026-07.note"]
+        assert restored is parent_ctx
+        assert parent_ctx.workflow_id == "parent-backfill-wf"
+        assert parent_ctx.function_id == -1

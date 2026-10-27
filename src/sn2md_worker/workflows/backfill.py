@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 import structlog
-from dbos import DBOS, SetEnqueueOptions
+from dbos import DBOS
 from dbos._error import DBOSQueueDeduplicatedError
 
 from sn2md_worker.config import Settings, get_settings
@@ -17,7 +17,11 @@ from sn2md_worker.state import conversions
 from sn2md_worker.state.conversions import ConversionRecordView
 from sn2md_worker.state.models import ConversionStatus
 from sn2md_worker.workflows.convert_note import convert_note
-from sn2md_worker.workflows.queues import CONVERT_QUEUE_NAME, POLL_QUEUE_NAME
+from sn2md_worker.workflows.queues import (
+    CONVERT_QUEUE_NAME,
+    POLL_QUEUE_NAME,
+    detached_enqueue,
+)
 
 __all__ = ["backfill", "backfill_impl", "scheduled_backfill"]
 
@@ -47,7 +51,8 @@ def scheduled_backfill(scheduled_time: datetime, context: str) -> None:
     `DBOS.create_schedule` invokes scheduled workflows with. Root
     trigger: a fresh correlation id is minted per cron tick."""
     correlation_id = new_correlation_id()
-    DBOS.enqueue_workflow(POLL_QUEUE_NAME, backfill, correlation_id)
+    with detached_enqueue():
+        DBOS.enqueue_workflow(POLL_QUEUE_NAME, backfill, correlation_id)
     _log.info("scheduled_backfill_enqueued", correlation_id=correlation_id)
 
 
@@ -100,7 +105,7 @@ def backfill_impl(
 
                 if _needs_conversion(existing.get(key), file_id=file.id, md5=file.md5_checksum):
                     try:
-                        with SetEnqueueOptions(deduplication_id=f"{file.id}:{source_path}"):
+                        with detached_enqueue(deduplication_id=f"{file.id}:{source_path}"):
                             DBOS.enqueue_workflow(
                                 CONVERT_QUEUE_NAME,
                                 convert_note,

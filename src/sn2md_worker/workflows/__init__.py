@@ -52,6 +52,7 @@ __all__ = [
     "RENEW_SCHEDULE_NAME",
     "backfill",
     "backfill_impl",
+    "cancel_stale_version_workflows",
     "convert_note",
     "convert_note_impl",
     "delete_output",
@@ -69,6 +70,40 @@ __all__ = [
     "seed_cursor",
     "seed_cursor_if_ready",
 ]
+
+
+def cancel_stale_version_workflows() -> None:
+    """Cancel active workflows from a different DBOS application_version.
+
+    DBOS only recovers `PENDING` and dequeues `ENQUEUED`/`DELAYED` rows
+    whose `application_version` matches the running process's
+    `DBOS.application_version`. Without blue/green deployments, any row
+    left behind by an older version would never execute and would
+    permanently hold its `(queue_name, deduplication_id)` constraint in
+    `workflow_status`. Cancelling them clears `queue_name` and
+    `deduplication_id` so startup `backfill` / `poll_changes` can
+    re-drive any needed work cleanly.
+    """
+    current_version = DBOS.application_version
+    active = DBOS.list_workflows(
+        status=["ENQUEUED", "PENDING", "DELAYED"],
+        load_input=False,
+        load_output=False,
+    )
+    stale_ids = [
+        wf.workflow_id
+        for wf in active
+        if wf.app_version is not None and wf.app_version != current_version
+    ]
+    if not stale_ids:
+        return
+    DBOS.cancel_workflows(stale_ids)
+    _log.warning(
+        "stale_version_workflows_cancelled",
+        count=len(stale_ids),
+        current_version=current_version,
+        workflow_ids=stale_ids,
+    )
 
 
 def register_queues() -> None:
