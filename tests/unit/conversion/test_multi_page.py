@@ -815,6 +815,15 @@ class TestExtractCachedBodyRejectsMalformedFiles:
     def test_missing_frontmatter_returns_none(self) -> None:
         assert multi_page._extract_cached_body("just some markdown\n") is None
 
+    def test_horizontal_rule_without_opening_frontmatter_returns_none(self) -> None:
+        rendered = (
+            "intro paragraph before horizontal rule\n"
+            "---\n\n"
+            "body after horizontal rule\n\n"
+            "![Page 1](page-01.png)\n"
+        )
+        assert multi_page._extract_cached_body(rendered) is None
+
     def test_missing_trailing_image_returns_none(self) -> None:
         rendered = (
             "---\ncreated: 2026-07-04\ntags: supernote\npage: 1\nof: 2\n---\n\n"
