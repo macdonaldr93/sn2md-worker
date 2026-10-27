@@ -213,6 +213,7 @@ def page_index_from_filename(name: str) -> int | None:
 # Anchored to \Z so we only strip the render's own trailing image line,
 # not an inline image the user might have added mid-body.
 _TRAILING_IMAGE_RE = re.compile(r"\n\n!\[Page \d+\]\(page-\d+\.png\)\n?\Z")
+_FRONTMATTER_OPEN = "---\n"
 _FRONTMATTER_CLOSE = "\n---\n\n"
 
 
@@ -222,6 +223,8 @@ def _extract_cached_body(rendered: str) -> str | None:
     Returns None for unparseable files (user edit removed the image ref,
     legacy pre-multi-page format) so those pages fall back to Gemini.
     """
+    if not rendered.startswith(_FRONTMATTER_OPEN):
+        return None
     close_idx = rendered.find(_FRONTMATTER_CLOSE)
     if close_idx == -1:
         return None
