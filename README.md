@@ -16,25 +16,18 @@ for Unraid but works anywhere Docker does.
 
 ## How it works
 
-```
-Supernote ─sync→ Google Drive ─push notification→ /webhooks/drive
-                                                       │
-                                                       ▼
-                    ┌─────── sn2md-worker (Docker) ────────┐
-                    │  FastAPI  +  DBOS workflows           │
-                    │  ┌─ poll_changes → convert_note ──┐  │
-                    │  │                delete_output   │  │
-                    │  │  renew_watch_channel (cron)     │  │
-                    │  │  backfill (startup)             │  │
-                    │  └── SQLite (DBOS + app tables) ──┘  │
-                    │              │                        │
-                    │              ▼                        │
-                    │           /vault  (bind mount)        │
-                    └───────────────────────────────────────┘
-                                   │
-                    obsidian-sync container (headless CLI)
-                                   │
-                          Obsidian Sync → phones, laptop
+```mermaid
+flowchart TD
+    SN["Supernote"] -->|sync| GD["Google Drive"]
+    GD -->|push notification| WH["/webhooks/drive"]
+
+    subgraph Worker["sn2md-worker (Docker)"]
+        WH --> WF["FastAPI + DBOS workflows (SQLite)"]
+        WF --> V["/vault (bind mount)"]
+    end
+
+    V --> OS["obsidian-sync container (headless CLI)"]
+    OS --> SYNC["Obsidian Sync -> phones, laptop"]
 ```
 
 Each note becomes a folder with one Markdown file per page and an
