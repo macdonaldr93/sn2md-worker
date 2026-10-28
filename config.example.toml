@@ -18,7 +18,7 @@ root_path = "/vault"
 
 [sn2md]
 # llm-gemini requires the "gemini/" prefix on the model name.
-model = "gemini/gemini-2.5-pro"
+model = "gemini/gemini-3.8-flash"
 # api_key can be set here, or via env: LLM_GEMINI_KEY or SN2MD_WORKER__SN2MD__API_KEY
 
 # Optional: override the per-page prompt. Must contain a {context}

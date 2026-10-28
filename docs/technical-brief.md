@@ -144,7 +144,7 @@ sn2md-worker/
 | Google Drive       | `google-api-python-client`, `google-auth` | current          |
 | Durable workflows  | `dbos` (DBOS Transact)                    | current stable   |
 | Note conversion    | `sn2md` (as library)                      | v2.7.0           |
-| LLM provider       | `llm` + `llm-gemini`                      | llm-gemini ≥0.32 |
+| LLM provider       | `llm` + `llm-gemini`                      | llm-gemini ≥0.35 |
 | Structured logging | `structlog` (or stdlib + json formatter)  | latest           |
 | Testing            | `pytest`, `pytest-asyncio`                | current          |
 | Quality            | `ruff`, `mypy`, `pre-commit`              | current          |
@@ -540,7 +540,7 @@ layout. Sections:
   `*/5 * * * *`), `backfill_sweep_cron` (default `0 5 * * *`), debounce
   timing knobs (reserved for the deferred `debounce_file` workflow).
 - `[vault]` — `root_path`.
-- `[sn2md]` — `model` (default `gemini/gemini-2.5-pro`), `api_key`
+- `[sn2md]` — `model` (default `gemini/gemini-3.8-flash`), `api_key`
   (SecretStr, optional; falls back to `LLM_GEMINI_KEY` env var),
   `prompt` (optional full-prompt override; must include `{context}`).
 - `[queue]` — `convert_concurrency` (default 2).
