@@ -164,6 +164,15 @@ against real APIs:
   `_succeeded` / `_failed` / `_skipped(reason=…)`. See tech-brief §14.
 - **Conventional commit** subject lines, one-liner, no
   `Co-Authored-By` trailer.
+- **Draft PRs by default** — open pull requests with `gh pr create --draft`.
+- **Documentation stays high-level and version-free** — keep docs concise,
+  describe high-level concepts rather than private function names, and
+  never hardcode specific Gemini model versions or dependency versions in
+  prose (defer to `pyproject.toml` and `config.example.toml` as the
+  single sources of truth).
+- **CI scripts are tested Python modules** — put CI helper logic under
+  `scripts/ci/` with unit tests under `tests/unit/ci/` and run via
+  `uv run`, rather than inlining Python inside workflow YAML.
 - **No migration framework by choice** — see item 3 above.
 
 ## Deferred by design (not bugs)
