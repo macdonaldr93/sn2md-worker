@@ -9,11 +9,7 @@ cycles.
 
 from __future__ import annotations
 
-__all__ = [
-    "CONVERT_QUEUE_NAME",
-    "DELETE_QUEUE_NAME",
-    "POLL_QUEUE_NAME",
-]
+__all__ = ["CONVERT_QUEUE_NAME", "DELETE_QUEUE_NAME", "POLL_QUEUE_NAME"]
 
 CONVERT_QUEUE_NAME = "convert_queue"
 DELETE_QUEUE_NAME = "delete_queue"
