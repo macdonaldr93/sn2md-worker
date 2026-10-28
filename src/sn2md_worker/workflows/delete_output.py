@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 import structlog
 from dbos import DBOS, SetEnqueueOptions
 from dbos._error import DBOSQueueDeduplicatedError
-from pydantic import BaseModel, ConfigDict
 
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.conversion.paths import resolve_vault_subdir
@@ -29,9 +29,8 @@ __all__ = ["delete_output", "delete_output_impl"]
 _log = get_logger("sn2md_worker.workflows.delete_output")
 
 
-class _RepointTarget(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+@dataclass(frozen=True, slots=True)
+class _RepointTarget:
     new_file_id: str
     source_path: str
     logical_key: str

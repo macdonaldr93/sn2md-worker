@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
 from dbos import DBOS, SetEnqueueOptions
 from dbos._error import DBOSQueueDeduplicatedError
-from pydantic import BaseModel, ConfigDict
 
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.conversion.paths import UnsafePathError, logical_key
@@ -28,16 +28,14 @@ __all__ = ["backfill", "backfill_impl", "scheduled_backfill"]
 _log = get_logger("sn2md_worker.workflows.backfill")
 
 
-class _BackfillTarget(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+@dataclass(frozen=True, slots=True)
+class _BackfillTarget:
     file_id: str
     source_path: str
 
 
-class _BackfillPlan(BaseModel):
-    model_config = ConfigDict(frozen=True)
-
+@dataclass(frozen=True, slots=True)
+class _BackfillPlan:
     targets: tuple[_BackfillTarget, ...] = ()
     skipped: int = 0
     unsafe: int = 0
