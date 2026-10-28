@@ -1,9 +1,8 @@
 # CLAUDE.md — workflows
 
-DBOS workflow modules. Every workflow follows the same three
-conventions.
+DBOS workflow modules. Every workflow follows the same conventions.
 
-## 1. Wrapper + impl split
+## 1. Wrapper, impl, and step boundaries
 
 ```python
 @DBOS.workflow()
@@ -29,177 +28,96 @@ def convert_note_impl(
     ...
 ```
 
-- Public wrapper: positional args (matches `DBOS.enqueue_workflow`
-  ergonomics) and no dependency on singletons at the call site.
-  `correlation_id` is always the TRAILING defaulted arg: adding it that
-  way keeps DBOS recovery of in-flight pre-upgrade workflows compatible
-  (their persisted args simply omit it). The wrapper also binds
-  `dbos_workflow_id` (via the `DBOS.workflow_id` classproperty) so every
-  log line from the run links back to DBOS's own workflow row.
-- `_impl`: kwargs, takes the injected dependency and `settings` (and
-  `now` where a workflow uses wall-clock). Tests call the impl directly
-  with fakes.
-- Scheduler-driven wrappers (`scheduled_poll_changes`,
-  `scheduled_backfill`, `renew_watch_channel`) keep the exact
-  `(scheduled_time, context)` signature `DBOS.create_schedule` invokes
-  them with: no `correlation_id` arg; they mint one per tick instead.
-- The seam'd impls (`convert_note`, `backfill`, `delete_output`) take
-  `source: NoteSource` (the ingestion seam from `sources/`); tests mock
-  the protocol with `MagicMock(spec=NoteSource)`. The
-  `poll_changes` / `renew_watch_channel` impls still take
-  `drive: DriveClient` on purpose: the change-feed/watch machinery is
-  Drive infrastructure that gets deleted entirely (not reimplemented)
-  if a local source ever replaces Drive.
-- `set_drive_client`, `set_settings`, `set_engine` are wired at startup
-  by `__main__.py`; wrappers reach them via `get_*()`. The wrapper is
-  the composition point: it passes `get_drive_client()` as `source=`
-  for the seam'd workflows.
+- **Public wrapper**: positional args (matching `DBOS.enqueue_workflow`
+  ergonomics) with `correlation_id` as the trailing defaulted argument so
+  DBOS recovery of pre-upgrade workflows remains compatible. Binds
+  `dbos_workflow_id` into structlog contextvars.
+- **`_impl`**: keyword-only args taking injected dependencies (`source:
+  NoteSource` for `convert_note`, `backfill`, `delete_output`; `drive:
+  DriveClient` for `poll_changes`, `renew_watch_channel`) plus `settings`.
+  Unit tests call `_impl` directly with fakes/mocks.
+- **Scheduler wrappers** (`scheduled_poll_changes`, `scheduled_backfill`,
+  `renew_watch_channel`): keep the `(scheduled_time, context)` signature
+  required by `DBOS.create_schedule` and mint a fresh `correlation_id` per
+  tick.
+- **`@DBOS.step()` boundaries**: DBOS assigns sequential `function_id`s to
+  every step and child `DBOS.enqueue_workflow` call inside a workflow and
+  verifies them against `operation_outputs` on recovery replay. Any
+  non-deterministic I/O (Drive API calls, SQLite reads/writes, filesystem
+  checks) that determines whether or what to enqueue MUST run inside a
+  `@DBOS.step()` returning a frozen dataclass (or primitive), with
+  `DBOS.enqueue_workflow` called from the enclosing workflow loop.
 
 ## 2. Structured log events + correlation
 
-Every impl body opens a `bound_contextvars` scope so subsequent log
-calls inherit the workflow context automatically:
+Every impl opens a `bound_contextvars` scope and logs `<workflow>_started`,
+`<workflow>_succeeded`, `<workflow>_failed` (`exc_info=True`), or
+`<workflow>_skipped(reason=…)`:
 
-```python
-def convert_note_impl(*, file_id, source_path, source, settings, correlation_id=None):
-    correlation_id = correlation_id or new_correlation_id()
-    key = logical_key(source_path)
-    with structlog.contextvars.bound_contextvars(
-        workflow="convert_note", file_id=file_id, logical_key=key,
-        correlation_id=correlation_id,
-    ):
-        _log.info("convert_note_started")
-        try:
-            ...
-            _log.info("convert_note_succeeded")
-        except Exception as exc:
-            _log.error("convert_note_failed", error=str(exc), exc_info=True)
-            raise
-```
+- `request_id` is HTTP-scoped (bound by `RequestIdMiddleware` and echoed
+  in `X-Request-Id`).
+- `correlation_id` traces one logical operation across DBOS queues. It is
+  minted at root triggers (webhook receipt, cron ticks, startup helpers)
+  and passed as the trailing workflow argument to every child enqueue.
 
-Skips use `reason=`:
+## 3. Queues and schedules
 
-```python
-_log.info("convert_note_skipped", reason="up_to_date")
-```
+Use the queue constants from `workflows/queues.py` and pass `correlation_id`
+through on every child enqueue. Conversion enqueues use
+`SetEnqueueOptions(deduplication_id=f"{file_id}:{source_path}")` to drop
+redundant enqueues while a conversion for the same file and path is
+already queued or running.
 
-Levels: INFO on happy path, WARNING for graceful degradation
-(configuration missing, safety guard tripped), ERROR for failures.
-
-Two distinct ids, on purpose:
-
-- `request_id` is HTTP-scoped: `app.RequestIdMiddleware` binds it (plus
-  `method`, `path`) for the lifetime of one inbound request and echoes
-  it back in the `X-Request-Id` response header.
-- `correlation_id` identifies one end-to-end logical operation and
-  crosses the enqueue boundary as an explicit trailing workflow arg
-  (DBOS persists workflow args durably; contextvars never reach the
-  worker threads). It is minted once at each root trigger (webhook
-  receipt, `scheduled_poll_changes` cron tick, `scheduled_backfill`
-  cron tick, renewal run,
-  `ensure_active_channel` at boot, `enqueue_startup_backfill`) via
-  `correlation.new_correlation_id()`, then inherited by every child
-  enqueue. Impls are self-healing: called with `None` (pre-upgrade
-  replays, direct invocations) they mint a fresh id before binding it.
-  The webhook logs `correlation_id` as an event field so the
-  HTTP-scoped `request_id` and the async chain link from one line.
-
-## 3. Enqueueing from another workflow
-
-Use the queue constants from `workflows/__init__.py`, and always pass
-your own `correlation_id` through as the trailing arg so the child run
-stays traceable to the root trigger:
-
-```python
-DBOS.enqueue_workflow(CONVERT_QUEUE_NAME, convert_note, file_id, source_path, correlation_id)
-DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, "webhook", correlation_id)
-```
-
-Queues (registered by `workflows.register_queues()` after
-`DBOS.launch()`):
-
-- `convert_queue` — `worker_concurrency=settings.queue.convert_concurrency`
-  (default 2). Serves `convert_note` only.
-- `delete_queue` — `worker_concurrency=2`. Serves `delete_output` on
-  its own queue so a batch of long conversions can't block the fast
-  filesystem-only deletes (a stale delete arriving mid-backfill
-  completes without waiting).
-- `poll_queue` — `worker_concurrency=1`. Serves `poll_changes` and
+Queues:
+- `convert_queue` (`worker_concurrency=settings.queue.convert_concurrency`,
+  default 2) — runs `convert_note`.
+- `delete_queue` (`worker_concurrency=2`) — runs `delete_output`
+  independently so long Gemini conversions never block vault deletes.
+- `poll_queue` (`worker_concurrency=1`) — serializes `poll_changes` and
   `backfill`.
 
-Schedules (registered by `workflows.register_schedules()`, each
-pre-checked idempotently via `DBOS.get_schedule`):
+Schedules (idempotent; updated in place if the configured cron changes):
+- `renew-watch-channel` (`0 6 * * *`) — daily watch-channel renewal check.
+- `fallback-poll-changes` (`settings.drive.fallback_poll_cron`, default
+  `*/5 * * * *`) — enqueues `poll_changes("fallback")` on `poll_queue` to
+  catch dropped Drive push notifications.
+- `backfill-sweep` (`settings.drive.backfill_sweep_cron`, default
+  `0 5 * * *`) — enqueues `backfill` on `poll_queue` daily to retry
+  conversions that previously failed.
 
-- `renew-watch-channel` — cron `0 6 * * *` (daily 06:00 UTC). Runs
-  `renew_watch_channel`.
-- `fallback-poll-changes` — cron from `settings.drive.fallback_poll_cron`
-  (default `*/5 * * * *`). Runs `scheduled_poll_changes`, which enqueues
-  `poll_changes("fallback")` onto `poll_queue`. The safety net for push
-  notifications Google silently dropped (or stopped delivering) while
-  the process stayed up — the one case the boot-time recovery paths
-  can't cover because there was never a restart.
-- `backfill-sweep` - cron from `settings.drive.backfill_sweep_cron`
-  (default `0 5 * * *`, daily 05:00 UTC). Runs `scheduled_backfill`,
-  which enqueues `backfill` onto `poll_queue`. Re-drives conversions
-  that failed permanently (record stale or non-SUCCESS), the one case
-  neither the fallback poll (change-log only) nor the boot-time paths
-  cover while the process stays up.
+## 4. Startup sequence after `DBOS.launch()`
 
-## Startup helpers exposed by this package
+1. Cancel any active (`ENQUEUED` / `PENDING` / `DELAYED`) workflows left by
+   a different `DBOS.application_version` so their queue deduplication IDs
+   are released.
+2. Register queues and schedules.
+3. Ensure an active watch channel exists (and enqueue a recovery poll if
+   the prior channel expired while the worker was down).
+4. Enqueue the startup `backfill`.
 
-Called from `__main__.py` in order after `DBOS.launch()`:
+## 5. Recovery behaviors
 
-1. `register_queues()` — creates the three DBOS queues.
-2. `register_schedules()` — installs the daily renewal cron and the
-   fallback poll cron; pre-checks each via `DBOS.get_schedule` before
-   calling `create_schedule` so a re-boot on the same DB is a no-op
-   instead of raising.
-3. `seed_cursor_if_ready(drive)` — writes an initial `drive_change_cursor`
-   row from `get_start_page_token()` if none exists (dev-friendly:
-   skips if DriveClient isn't available).
-4. `ensure_active_channel_if_ready(drive, settings)` — delegates to
-   `renew_watch_channel_impl` with `trigger_source="startup"` so the
-   first channel is created without waiting for the cron. Also
-   enqueues a `poll_changes("recovery")` if the previously-active
-   channel expired while we were down.
-5. `enqueue_startup_backfill()` — enqueues `backfill` on `poll_queue`.
+- **Cursor expired** (Drive 4xx on `changes.list`): resets cursor from
+  Drive's current start token and enqueues `backfill`.
+- **Supernote replace-on-sync**: `delete_output` checks Drive for a live
+  file with the same name in the same parent folder before deleting vault
+  output; if found, it repoints the conversion record to the new `fileId`
+  and enqueues `convert_note`.
+- **Drive move or rename**: when `convert_note` sees an existing conversion
+  record for the same `fileId` at a different `logical_key`, it seeds
+  cached pages from the old vault folder and removes the old vault folder
+  and stale DB rows once conversion finishes. Moving a note outside the
+  source folder triggers `delete_output`.
+- **Watch-channel renewal**: serialized by an advisory file lock and uses
+  two-phase persistence (pending row written before calling Drive,
+  confirmed and marked active after) so pushes arriving mid-handshake
+  still authenticate. Replacing an existing channel enqueues a catch-up
+  poll.
+- **Dropped pushes & failed conversions**: covered while the process stays
+  up by the `fallback-poll-changes` and `backfill-sweep` schedules.
 
-## Recovery behaviors worth naming
+## 6. Deferred workflows
 
-- **Cursor expired** (Drive 4xx on `changes.list`): `poll_changes`
-  catches `DrivePermanentError`, resets the cursor via
-  `get_start_page_token`, and enqueues `backfill` so nothing is lost.
-- **Missed create-side push after `delete_output._repoint`**:
-  `delete_output` enqueues `convert_note(live.id, source_path)` after
-  repointing, so even if `poll_changes` never saw the replacement, the
-  vault stays fresh.
-- **Renewal safety**: `renew_watch_channel` uses a two-phase pending
-  row — insert BEFORE the Drive call, `confirm` after — so a crash
-  mid-renewal doesn't drop notifications. `RENEWAL_HEADROOM = 48h`
-  gives the daily cron a two-day cushion.
-- **Renewal seam**: when `renew_watch_channel_impl` replaces an existing
-  channel (near-expiry or webhook-URL change) it enqueues a catch-up
-  `poll_changes("renewal")` so changes landing between the old channel's
-  last push and the new channel going active aren't lost. Skipped on
-  first-ever creation (`active is None`) since the startup backfill
-  already covers the initial state.
-- **Dropped push notifications**: the `fallback-poll-changes` cron polls
-  Drive on `settings.drive.fallback_poll_cron` regardless of channel
-  health, so a push Google silently dropped (or stopped delivering to a
-  still-valid channel) while the process stayed up self-heals within one
-  cron interval instead of stalling until the next restart.
-- **Failed conversions**: a conversion that fails permanently (for
-  example Gemini 429 retries exhausted) leaves the DBOS workflow in
-  ERROR and the conversion record stale or non-SUCCESS; nothing on the
-  change-log path re-drives it because the note itself didn't change.
-  The daily `backfill-sweep` cron enqueues a `backfill` (cheap and
-  idempotent: single SELECT, walk the tree, enqueue only stale notes),
-  so such notes self-heal within a day instead of waiting for a
-  restart or the next edit.
-
-## Deferred workflows
-
-- `debounce_file` — the `debounce_state` table and repo are in place
-  but the workflow itself isn't built. `poll_changes` enqueues
-  `convert_note` directly. Add when a real partial-upload conversion
-  problem appears.
+- `debounce_file` — schema and repository exist, but `poll_changes`
+  enqueues `convert_note` directly because Drive only notifies on
+  completed uploads.

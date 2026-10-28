@@ -32,9 +32,8 @@ Runs continuously as a Docker container on my Unraid server.
 
 ### Language & tooling
 
-- **Language**: Python 3.12+. Drives sn2md's per-page
-  primitives (`NotebookExtractor.extract_images`, `image_to_markdown`)
-  from `conversion/multi_page.py` so we can cache per-page LLM output.
+- **Language**: Python 3.12+. Drives sn2md's per-page extraction and
+  transcription primitives so per-page LLM output can be cached.
 - **Packaging**: `uv` for venv, dependencies, lockfile, and runners.
 - **Lint/format**: `ruff`.
 - **Type checking**: `mypy`.
@@ -56,102 +55,90 @@ Runs continuously as a Docker container on my Unraid server.
 - **Catch-up on restart**: `backfill` workflow enqueues on startup — it
   walks the source folder tree and enqueues `convert_note` for anything
   missing from `conversion_records` or whose md5 doesn't match.
-- **Fallback poller** (shipped): a scheduled `poll_changes` cron
-  (default every 5 minutes, configurable) walks the change feed even
-  when no push notification arrives, so a webhook Google drops (or
-  silently stops delivering to a still-valid channel) self-heals within
-  minutes instead of waiting for a restart. Renewing a watch channel
-  also triggers a catch-up poll, covering changes that land while the
-  channel is being swapped. Merged to main 2026-07-12; ships in the
-  first release after v0.2.0.
+- **Fallback poller**: a scheduled `poll_changes` cron (default every
+  5 minutes, configurable) walks the change feed even when no push
+  notification arrives, so a dropped webhook self-heals within minutes
+  instead of waiting for a restart. Renewing a watch channel also
+  triggers a catch-up poll to cover changes during the channel swap.
 - **Public URL**: existing reverse proxy on Unraid handles TLS + routing to
-  the worker container. Webhook path suggested: `/webhooks/drive`.
-- **Watch channel renewal**: Confirmed max TTL 7 days (604800s) for
-  `changes.watch`; no automatic renewal on Drive's side. We omit
-  `expiration` from the `watch_changes` request so Drive picks its own
-  max (avoiding host-clock skew), then a daily DBOS cron
-  (`renew_watch_channel`) creates a fresh channel when the current one
-  is within `RENEWAL_HEADROOM = 48h` of expiry (5-day cadence in
-  practice).
+  the worker container. Webhook path: `/webhooks/drive`.
+- **Watch channel renewal**: Max TTL is 7 days (604800s) for
+  `changes.watch` with no automatic renewal on Drive's side. We omit
+  `expiration` from the watch request so Drive assigns its maximum TTL
+  (avoiding host-clock skew), and a daily DBOS cron renews the channel
+  when within 48 hours of expiry or when the configured webhook URL
+  changes.
 - **Webhook authenticity**: `token` field set at channel creation (32-byte
   random hex), echoed as `X-Goog-Channel-Token` on every notification.
   Worker verifies token + `X-Goog-Channel-Id` against the active channel
   record.
-- **Debounce** (deferred by design): the tech brief includes a per-file
-  size/md5 stability poll before conversion. Not built — Drive appears
-  to only publish notifications for completed uploads, so we've enqueued
-  `convert_note` directly. Table `debounce_state` exists and the runtime
-  is wired for it; we'll add the workflow if we observe bad conversions
-  from partial files in practice.
-- **Update handling**: at the note level, we skip when the source
-  `.note` md5 matches the last successful conversion. Below that, the
-  per-page cache (`page_conversions` table + `page-NN.png` md5) means
-  we only call Gemini for pages whose rendered PNG has changed. Editing
-  the last page of a 20-page notebook costs one Gemini call, not 20.
-  Identity for "same note" is the Drive path + filename, not the
-  `fileId` (see technical-brief §4a). The cache matches pages by
-  content hash (rendered-PNG md5), not position, so inserting a page
-  mid-note re-converts only the new page rather than cascading the
-  pages after it through Gemini (shipped 2026-07-05). Gemini
-  rate-limit windows are ridden out in place with extended backoff;
-  anything that still fails is re-driven by the daily backfill sweep
-  (both shipped 2026-07-12).
-- **Deletion handling**: if a `.note` is deleted from Drive, delete the
-  corresponding Markdown + assets from the vault (mirror source). Delete
-  workflow first confirms no live file with the same logical key still
-  exists — protects against the delete-then-recreate race during device
-  edits.
-- **Ingestion seam** (merged to main 2026-07-12): the conversion
-  workflows read notes through a source-neutral `NoteSource` interface;
-  Google Drive is its first and only implementation. This keeps
-  dropping the Google dependency later (for example a local-folder or
-  direct-from-device source) a configuration choice rather than a
-  rewrite. Optionality only for now: alternatives are exploratory and
-  no decision to move off Drive has been made.
+- **Debounce** (deferred by design): per-file size/md5 stability polling
+  is defined in the schema (`debounce_state`), but Drive only publishes
+  notifications for completed uploads so `poll_changes` enqueues
+  `convert_note` directly.
+- **Update, move, and rename handling**: at the note level, conversion
+  is skipped when the source `.note` md5 matches the last successful
+  conversion. Below that, the hash-first per-page cache
+  (`page_conversions` table + rendered PNG md5) calls Gemini only for
+  pages whose PNG hash has not been transcribed before — editing one
+  page or inserting a page mid-note only transcribes the new or modified
+  page, while preserving existing pages' `created` frontmatter dates.
+  Identity for a note is its Drive path + filename (`logical_key`), not
+  its `fileId` (see technical-brief §4a). When a note is moved or
+  renamed in Drive, cached pages are seeded from the prior vault folder
+  and the old folder and DB rows are cleaned up once conversion
+  completes. Gemini rate-limit windows are ridden out in place with
+  extended backoff; anything that still fails is re-driven by the daily
+  backfill sweep.
+- **Deletion handling**: if a `.note` is deleted from Drive (or moved
+  outside the source folder), the corresponding Markdown + assets are
+  removed from the vault. The delete workflow first checks whether a
+  live replacement file with the same name exists in the parent folder
+  to protect against Supernote's replace-on-sync pattern.
+- **Ingestion seam**: conversion workflows read notes through a
+  source-neutral `NoteSource` protocol; Google Drive is its current
+  implementation, keeping a future local-folder or direct-device source
+  a configuration choice rather than a workflow rewrite.
 
 ### Backfill & idempotency
 
-- **Backfill on startup**: scan the source folder; convert every `.note` that
-  doesn't have a matching successful-conversion record. Ensures files that
-  arrived while the worker was down are not missed.
+- **Backfill on startup & daily sweep**: scans the source folder and
+  enqueues `convert_note` for any `.note` lacking a matching successful
+  conversion record (with queue deduplication so duplicate triggers do
+  not stack redundant runs).
 - **Idempotency key**: source file hash (md5 from Drive metadata) → success
-  record persisted in DBOS/SQLite.
+  record persisted in SQLite.
 
 ### LLM / sn2md
 
 - **Model**: `gemini/gemini-2.5-pro` (via `llm-gemini` plugin ≥0.32).
-- **Prompt**: sn2md's default `TO_MARKDOWN_TEMPLATE` (works well with
-  Gemini per sn2md's own guidance).
-- **API key**: `LLM_GEMINI_KEY` env var, or `sn2md.api_key` in config.
-  `_resolve_gemini_key` in `workflows/convert_note.py` prefers the
-  config value, falls back to the env var, raises if neither is set.
-- **Integration surface**: we drive sn2md's per-page primitives —
-  `NotebookExtractor.extract_images` renders each page to PNG,
-  `sn2md.ai_utils.image_to_markdown` calls Gemini for one page at a
-  time. This lets us cache per-page LLM output on hash, which
-  `import_supernote_file_core` (sn2md's single-file wrapper) doesn't
-  support.
+- **Prompt**: sn2md's default Markdown template augmented with stricter
+  ASCII-only Mermaid and CommonMark escaping guidance (overridable via
+  `sn2md.prompt` in config).
+- **API key**: `LLM_GEMINI_KEY` env var or `sn2md.api_key` in config.
+- **Integration surface**: uses sn2md's per-page image extraction and
+  LLM transcription primitives so each page's output can be cached by
+  PNG hash and emitted as its own Markdown file.
 
 ### Queue & durability
 
 - **Framework**: [DBOS Transact](https://dbos.dev) for Python with the
   SQLite backend.
-- **SQLite file**: on a mounted volume so state survives container
-  restarts.
-- **Confirmed constraints**: SQLite is officially supported but Postgres is
-  the documented production recommendation. When using SQLite,
-  `use_listen_notify=False` is required (falls back to polling). Judged
-  acceptable given single-user throughput (a handful of notes per day, not
-  a busy queue).
-- **Retries**: DBOS workflows auto-recover from the last completed step on
-  restart; step-level retries configurable (specifics in technical brief).
-- **Concurrency**: `DBOS.register_queue("convert", worker_concurrency=N)` —
-  configurable, default 2.
-- **Scheduling**: `DBOS.create_schedule` used for the daily Drive
-  watch-channel renewal check, the fallback change poll (default
-  every 5 minutes), and a daily backfill sweep that re-drives any
-  conversion that failed permanently (for example after a Gemini
-  rate-limit window outlasted its retries).
+- **SQLite file**: single file on a mounted volume shared by DBOS
+  workflow tables and application tables, tuned with WAL mode,
+  `IMMEDIATE` transaction isolation, and a 30s busy timeout.
+- **Confirmed constraints**: SQLite requires `use_listen_notify=False`
+  (polling mode), which fits single-user home-service throughput.
+- **Retries & recovery**: DBOS workflows checkpoint step outputs in
+  SQLite and recover from the last completed step on restart; stale
+  workflows from any prior DBOS application version are cancelled on
+  boot so queue deduplication locks never wedge across upgrades.
+- **Concurrency**: dedicated queues for conversions (`convert_queue`,
+  configurable concurrency, default 2), deletes (`delete_queue`,
+  concurrency 2), and polling/backfill (`poll_queue`, concurrency 1).
+- **Scheduling**: DBOS schedules drive the daily watch-channel renewal
+  check, the fallback change poll (default every 5 minutes), and the
+  daily backfill sweep.
 
 ### Output layout
 
@@ -174,16 +161,14 @@ Runs continuously as a Docker container on my Unraid server.
 
 - **Runtime**: Docker container, linuxserver.io-style — supports `PUID`,
   `PGID`, `TZ`, `UMASK` env vars for correct host-side file ownership.
-  Two multi-arch (`linux/amd64` + `linux/arm64`) images published to
+  Two multi-arch (`linux/amd64` + `linux/arm64`) images are published to
   GHCR from the same repo: `sn2md-worker` (the worker) and
   `sn2md-worker/obsidian-sync` (a companion running Obsidian's headless
-  sync CLI against the shared vault dir). As of v0.2.0 (2026-07-11) the
-  companion is hands-off: it logs in and pairs the vault automatically
-  from `OBSIDIAN_*` env vars, runs as a fixed non-root user (`99:100`,
-  Unraid's `nobody:users`) rather than the linuxserver PUID/PGID
-  scheme, and clears a stale sync lock on startup instead of needing
-  manual intervention. Unraid operations are
-  documented in `docs/unraid-runbook.md`.
+  sync CLI against the shared vault dir). The companion logs in and
+  pairs the vault automatically from `OBSIDIAN_*` env vars, runs as a
+  fixed non-root user (`99:100`, Unraid's `nobody:users`), and clears
+  stale sync locks on startup. Unraid operations are documented in
+  `docs/unraid-runbook.md`.
 - **Mounts**:
   - `/data` — DBOS + application SQLite state, must be writable.
   - `/vault` — bind-mount to the Obsidian vault path on the host, must

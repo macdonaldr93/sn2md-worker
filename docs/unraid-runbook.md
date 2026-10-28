@@ -176,7 +176,7 @@ Log lines to watch for in order (`docker logs -f sn2md-worker | jq .`):
 5. `queues_registered` → `schedules_registered`
 6. `renew_watch_channel_created` (first channel — this proves the
    reverse proxy is reachable from Google)
-7. `backfill_enqueued` → `backfill_succeeded` (may take a while on a
+7. `startup_backfill_enqueued` → `backfill_succeeded` (may take a while on a
    folder with many existing notes; each note runs through Gemini)
 
 If step 6 doesn't appear, the reverse proxy route is broken — see
@@ -432,8 +432,8 @@ mv ${APPDATA}/data/sn2md-worker.sqlite ${APPDATA}/data/sn2md-worker.broken-$(dat
 # 3. Nuke SQLite state — startup backfill will re-populate from Drive.
 rm -f ${APPDATA}/data/sn2md-worker.sqlite*   # also removes -wal / -shm
 
-# 4. Start the container. `init_schema` runs on the empty file, then
-#    `backfill_enqueued` walks the entire Drive folder.
+# 4. Start the container. Schema initialization runs on the empty file, then
+#    `startup_backfill_enqueued` walks the entire Drive folder.
 docker start sn2md-worker
 
 # 5. Watch backfill complete. Duration ≈ notes × ~7.5s/page.
@@ -583,8 +583,8 @@ docker logs sn2md-worker | jq .
 - The Drive watch channel expired. Cron runs daily at 06:00 UTC to
   renew, so a fresh expiry means the last cron either didn't fire or
   errored.
-- Immediate recovery: `docker restart sn2md-worker` — `ensure_active_channel_if_ready`
-  creates a fresh channel on boot.
+- Immediate recovery: `docker restart sn2md-worker` — startup channel
+  recovery creates a fresh channel on boot.
 - Follow-up: search logs for `renew_watch_failed` in the last
   36 hours to see why the scheduled renewal failed.
 
@@ -602,11 +602,10 @@ docker logs sn2md-worker | jq .
 
 ### Watch channel expired while worker was down
 
-Boot handles this automatically:
-`ensure_active_channel_if_ready` sees the expired row, stops the old
-channel, creates a fresh one, and enqueues a recovery `poll_changes`
-that catches anything that changed while offline. Just start the
-container — no manual steps.
+Boot handles this automatically: startup channel recovery sees the
+expired row, stops the old channel, creates a fresh one, and enqueues a
+recovery `poll_changes` that catches anything that changed while
+offline. Just start the container — no manual steps.
 
 ### Container exited with `Killed` (OOM)
 
