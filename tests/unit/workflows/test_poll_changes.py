@@ -671,13 +671,10 @@ class TestConvertNoteEnqueueDeduplication:
         assert saved is not None
         assert saved.page_token == "10"
 
-    def test_detaches_from_parent_workflow_context_during_enqueue_and_restores_it_after(
+    def test_executes_io_in_dbos_steps_and_enqueues_at_workflow_level(
         self, engine: Engine, settings: Settings, drive: MagicMock
     ) -> None:
-        # GIVEN — poll_changes_impl is executing inside a parent DBOS workflow
-        # context (which would otherwise bind child enqueues to positional
-        # `function_id` steps in `operation_outputs` and replay stale step
-        # outputs on recovery after SQLite cursor advancement).
+        # GIVEN — poll_changes_impl runs inside a DBOS workflow context
         drive.get_start_page_token.return_value = "1"
         drive.changes_list.return_value = ChangesPage(
             changes=(
@@ -692,30 +689,51 @@ class TestConvertNoteEnqueueDeduplication:
 
         parent_ctx = DBOSContext()
         parent_ctx.workflow_id = "parent-poll-wf"
-        observed_in_workflow: list[bool] = []
+        events: list[tuple[str, str]] = []
 
-        def inspect_ctx(*_args: object, **_kwargs: object) -> None:
+        def fake_invoke_step(
+            _dbos: object,
+            _step_ctx: object,
+            func: object,
+            args: tuple[object, ...],
+            kwargs: dict[str, object],
+            *,
+            step_name: str,
+            **_opts: object,
+        ) -> object:
+            events.append(("step", step_name))
+            return func(*args, **kwargs)  # type: ignore[operator]
+
+        def fake_enqueue(*args: object, **_kwargs: object) -> None:
             ctx = get_local_dbos_context()
-            observed_in_workflow.append(ctx.is_within_workflow() if ctx is not None else False)
+            assert ctx is not None and ctx.is_workflow()
+            events.append(("enqueue", getattr(args[1], "__name__", str(args[1]))))
 
         # WHEN
         token = _dbos_context_var.set(parent_ctx)
         try:
-            with patch(
-                "sn2md_worker.workflows.poll_changes.DBOS.enqueue_workflow",
-                side_effect=inspect_ctx,
+            with (
+                patch("dbos._dbos._dbos_global_registry.dbos", MagicMock()),
+                patch("dbos._core.invoke_step", side_effect=fake_invoke_step),
+                patch(
+                    "sn2md_worker.workflows.poll_changes.DBOS.enqueue_workflow",
+                    side_effect=fake_enqueue,
+                ),
             ):
                 poll_changes_impl(trigger_source="test", drive=drive, settings=settings)
-                restored = get_local_dbos_context()
         finally:
             _dbos_context_var.reset(token)
 
-        # THEN — neither enqueue ran inside the parent workflow step context,
-        # and the parent context was restored untouched with function_id == -1
-        assert observed_in_workflow == [False, False]
-        assert restored is parent_ctx
-        assert parent_ctx.workflow_id == "parent-poll-wf"
-        assert parent_ctx.function_id == -1
+        # THEN — cursor load, page fetch/resolution, and cursor save run as
+        # @DBOS.step() operations, while child workflow enqueues happen at
+        # the workflow level between the steps
+        assert events == [
+            ("step", "_load_or_init_cursor"),
+            ("step", "_fetch_page_plan"),
+            ("enqueue", "convert_note"),
+            ("enqueue", "delete_output"),
+            ("step", "_save_cursor"),
+        ]
 
 
 class TestCursorSeedingRaceSafety:

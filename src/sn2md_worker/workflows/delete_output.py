@@ -4,7 +4,7 @@ import shutil
 from pathlib import Path
 
 import structlog
-from dbos import DBOS
+from dbos import DBOS, SetEnqueueOptions
 from dbos._error import DBOSQueueDeduplicatedError
 
 from sn2md_worker.config import Settings, get_settings
@@ -21,7 +21,7 @@ from sn2md_worker.sources.protocol import (
 from sn2md_worker.state import conversions, page_conversions
 from sn2md_worker.workflows.convert_note import convert_note
 from sn2md_worker.workflows.locks import lock_for
-from sn2md_worker.workflows.queues import CONVERT_QUEUE_NAME, detached_enqueue
+from sn2md_worker.workflows.queues import CONVERT_QUEUE_NAME
 
 __all__ = ["delete_output", "delete_output_impl"]
 
@@ -61,88 +61,109 @@ def delete_output_impl(
     ):
         _log.info("delete_output_started")
         try:
-            # First read is outside the lock only to resolve logical_key;
-            # the decisive re-read happens inside the lock.
-            with sql_session() as session:
-                record = conversions.get_by_current_file_id(session, file_id)
-            if record is None:
-                _log.info("delete_output_skipped", reason="no_record")
-                return
-
-            with lock_for(record.logical_key):
-                with sql_session() as session:
-                    record = conversions.get_by_current_file_id(session, file_id)
-                if record is None:
-                    _log.info("delete_output_skipped", reason="no_record_after_lock")
-                    return
-
-                if record.parent_folder_id:
-                    try:
-                        live = source.find_live_note(record.parent_folder_id, record.source_name)
-                    except SourceNotFoundError as exc:
-                        _log.warning(
-                            "delete_output_live_lookup_not_found",
-                            parent_folder_id=record.parent_folder_id,
-                            error=str(exc),
+            repointed = _repoint_or_delete_step(
+                file_id=file_id,
+                source=source,
+                settings=settings,
+            )
+            if repointed is not None:
+                new_file_id, source_path, logical_key = repointed
+                # Guards against a delete-side push without a
+                # matching create-side push.
+                try:
+                    with SetEnqueueOptions(deduplication_id=f"{new_file_id}:{source_path}"):
+                        DBOS.enqueue_workflow(
+                            CONVERT_QUEUE_NAME,
+                            convert_note,
+                            new_file_id,
+                            source_path,
+                            correlation_id,
                         )
-                        live = None
-                    except SourcePermanentError as exc:
-                        _log.warning(
-                            "delete_output_skipped",
-                            reason="live_lookup_permanent_error",
-                            parent_folder_id=record.parent_folder_id,
-                            logical_key=record.logical_key,
-                            error=str(exc),
-                        )
-                        return
-                    if live is not None and live.id != file_id:
-                        _repoint(logical_key=record.logical_key, new_file_id=live.id)
-                        # Guards against a delete-side push without a
-                        # matching create-side push.
-                        try:
-                            with detached_enqueue(
-                                deduplication_id=f"{live.id}:{record.source_path}"
-                            ):
-                                DBOS.enqueue_workflow(
-                                    CONVERT_QUEUE_NAME,
-                                    convert_note,
-                                    live.id,
-                                    record.source_path,
-                                    correlation_id,
-                                )
-                        except DBOSQueueDeduplicatedError:
-                            _log.info(
-                                "delete_output_repoint_convert_deduplicated",
-                                new_file_id=live.id,
-                                logical_key=record.logical_key,
-                            )
-                        _log.info(
-                            "delete_output_skipped",
-                            reason="repointed_to_new_file",
-                            new_file_id=live.id,
-                            logical_key=record.logical_key,
-                        )
-                        return
-
-                if not _delete_from_vault(record.output_rel_path, settings.vault.root_path):
-                    _log.warning(
-                        "delete_output_skipped",
-                        reason="vault_delete_refused",
-                        logical_key=record.logical_key,
+                except DBOSQueueDeduplicatedError:
+                    _log.info(
+                        "delete_output_repoint_convert_deduplicated",
+                        new_file_id=new_file_id,
+                        logical_key=logical_key,
                     )
-                    return
-
-                with sql_session() as session, session.begin():
-                    conversions.delete_by_logical_key(session, record.logical_key)
-                    page_conversions.delete_all_for_note(session, record.logical_key)
                 _log.info(
-                    "delete_output_succeeded",
-                    logical_key=record.logical_key,
-                    output_rel_path=record.output_rel_path,
+                    "delete_output_skipped",
+                    reason="repointed_to_new_file",
+                    new_file_id=new_file_id,
+                    logical_key=logical_key,
                 )
         except Exception as exc:
             _log.error("delete_output_failed", error=str(exc), exc_info=True)
             raise
+
+
+@DBOS.step()
+def _repoint_or_delete_step(
+    *,
+    file_id: str,
+    source: NoteSource,
+    settings: Settings,
+) -> tuple[str, str, str] | None:
+    """Perform the DB/Drive/filesystem delete or repoint inside a DBOS step.
+
+    Returns `(new_file_id, source_path, logical_key)` when a live twin was
+    found and repointed (so the enclosing workflow can enqueue `convert_note`),
+    or `None` when the output was deleted or skipped.
+    """
+    # First read is outside the lock only to resolve logical_key;
+    # the decisive re-read happens inside the lock.
+    with sql_session() as session:
+        record = conversions.get_by_current_file_id(session, file_id)
+    if record is None:
+        _log.info("delete_output_skipped", reason="no_record")
+        return None
+
+    with lock_for(record.logical_key):
+        with sql_session() as session:
+            record = conversions.get_by_current_file_id(session, file_id)
+        if record is None:
+            _log.info("delete_output_skipped", reason="no_record_after_lock")
+            return None
+
+        if record.parent_folder_id:
+            try:
+                live = source.find_live_note(record.parent_folder_id, record.source_name)
+            except SourceNotFoundError as exc:
+                _log.warning(
+                    "delete_output_live_lookup_not_found",
+                    parent_folder_id=record.parent_folder_id,
+                    error=str(exc),
+                )
+                live = None
+            except SourcePermanentError as exc:
+                _log.warning(
+                    "delete_output_skipped",
+                    reason="live_lookup_permanent_error",
+                    parent_folder_id=record.parent_folder_id,
+                    logical_key=record.logical_key,
+                    error=str(exc),
+                )
+                return None
+            if live is not None and live.id != file_id:
+                _repoint(logical_key=record.logical_key, new_file_id=live.id)
+                return (live.id, record.source_path, record.logical_key)
+
+        if not _delete_from_vault(record.output_rel_path, settings.vault.root_path):
+            _log.warning(
+                "delete_output_skipped",
+                reason="vault_delete_refused",
+                logical_key=record.logical_key,
+            )
+            return None
+
+        with sql_session() as session, session.begin():
+            conversions.delete_by_logical_key(session, record.logical_key)
+            page_conversions.delete_all_for_note(session, record.logical_key)
+        _log.info(
+            "delete_output_succeeded",
+            logical_key=record.logical_key,
+            output_rel_path=record.output_rel_path,
+        )
+        return None
 
 
 def _repoint(*, logical_key: str, new_file_id: str) -> None:

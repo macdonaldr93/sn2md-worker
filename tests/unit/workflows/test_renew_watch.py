@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from dbos._context import DBOSContext, _dbos_context_var, get_local_dbos_context
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
 
@@ -546,3 +547,72 @@ class TestRenewWatchConcurrencyAndCursorSafety:
         assert saved is not None
         assert saved.page_token == "ADVANCED-50"
         assert drive.watch_changes.call_args.kwargs["start_page_token"] == "ADVANCED-50"
+
+    def test_runs_channel_renewal_in_dbos_step_and_enqueues_catchup_poll_at_workflow_level(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — an expiring channel exists and renew_watch_channel_impl runs
+        # inside a DBOS workflow context
+        with Session(engine) as session, session.begin():
+            watch_channels.create(
+                session,
+                NewWatchChannel(
+                    channel_id="expiring",
+                    resource_id="res-old",
+                    token="old-token",
+                    webhook_url=settings.webhook.url,
+                    expires_at=NOW + timedelta(hours=12),
+                    start_page_token="SPT-OLD",
+                    created_at=NOW - timedelta(days=6),
+                ),
+            )
+            watch_channels.mark_active(session, "expiring")
+
+        parent_ctx = DBOSContext()
+        parent_ctx.workflow_id = "parent-renew-wf"
+        events: list[tuple[str, str]] = []
+
+        def fake_invoke_step(
+            _dbos: object,
+            _step_ctx: object,
+            func: object,
+            args: tuple[object, ...],
+            kwargs: dict[str, object],
+            *,
+            step_name: str,
+            **_opts: object,
+        ) -> object:
+            events.append(("step", step_name))
+            return func(*args, **kwargs)  # type: ignore[operator]
+
+        def fake_enqueue(*args: object, **_kwargs: object) -> None:
+            ctx = get_local_dbos_context()
+            assert ctx is not None and ctx.is_workflow()
+            events.append(("enqueue", str(args[2])))
+
+        # WHEN
+        token = _dbos_context_var.set(parent_ctx)
+        try:
+            with (
+                patch("dbos._dbos._dbos_global_registry.dbos", MagicMock()),
+                patch("dbos._core.invoke_step", side_effect=fake_invoke_step),
+                patch(
+                    "sn2md_worker.workflows.renew_watch.DBOS.enqueue_workflow",
+                    side_effect=fake_enqueue,
+                ),
+            ):
+                renew_watch_channel_impl(
+                    trigger_source="test",
+                    drive=drive,
+                    settings=settings,
+                    now=NOW,
+                )
+        finally:
+            _dbos_context_var.reset(token)
+
+        # THEN — channel check/stop/create ran as a @DBOS.step(), followed by
+        # workflow-level enqueue of the renewal catch-up poll
+        assert events == [
+            ("step", "_renew_channel_step"),
+            ("enqueue", "renewal"),
+        ]

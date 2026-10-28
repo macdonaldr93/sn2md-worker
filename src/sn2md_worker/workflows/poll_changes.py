@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Literal
 
 import structlog
-from dbos import DBOS
+from dbos import DBOS, SetEnqueueOptions
 from dbos._error import DBOSQueueDeduplicatedError
 
 from sn2md_worker.config import Settings, get_settings
@@ -23,7 +25,6 @@ from sn2md_worker.workflows.queues import (
     CONVERT_QUEUE_NAME,
     DELETE_QUEUE_NAME,
     POLL_QUEUE_NAME,
-    detached_enqueue,
 )
 
 __all__ = [
@@ -40,6 +41,25 @@ _NOTE_EXTENSION = ".note"
 POLL_TRIGGER_FALLBACK = "fallback"
 
 _log = get_logger("sn2md_worker.workflows.poll_changes")
+
+
+@dataclass(frozen=True, slots=True)
+class _ChangeAction:
+    target: Literal["convert_note", "delete_output"]
+    file_id: str
+    source_path: str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PagePlan:
+    cursor_expired: bool
+    new_cursor: str | None
+    actions: tuple[_ChangeAction, ...]
+    ignored: int
+    errored: int
+    next_page_token: str | None
+    new_start_page_token: str | None
 
 
 @DBOS.workflow()
@@ -63,10 +83,9 @@ def scheduled_poll_changes(scheduled_time: datetime, context: str) -> None:
     Signature stays exactly `(scheduled_time, context)`: that is what
     `DBOS.create_schedule` invokes scheduled workflows with. Root
     trigger: a fresh correlation id is minted per cron tick."""
-    with detached_enqueue():
-        DBOS.enqueue_workflow(
-            POLL_QUEUE_NAME, poll_changes, POLL_TRIGGER_FALLBACK, new_correlation_id()
-        )
+    DBOS.enqueue_workflow(
+        POLL_QUEUE_NAME, poll_changes, POLL_TRIGGER_FALLBACK, new_correlation_id()
+    )
 
 
 def poll_changes_impl(
@@ -105,67 +124,35 @@ def poll_changes_impl(
             # doesn't get served a stale entry on the next poll.
             metadata_cache: dict[str, NoteMetadata] = {}
 
-            def cached_get_metadata(fid: str) -> NoteMetadata:
-                if fid not in metadata_cache:
-                    metadata_cache[fid] = drive.get_metadata(fid, fields="id,name,parents")
-                return metadata_cache[fid]
-
             while True:
-                try:
-                    page = drive.changes_list(page_token=page_token)
-                except DrivePermanentError as exc:
-                    # A 4xx on `changes.list` almost always means our
-                    # persisted cursor is older than Drive's change-log
-                    # window (docs: tokens more than a few weeks old can
-                    # 404). Reset from `getStartPageToken` and enqueue a
-                    # backfill — no work is lost because backfill walks
-                    # the actual folder tree from the vault side.
-                    _log.warning(
-                        "poll_changes_cursor_expired",
-                        cursor=page_token,
-                        error=str(exc),
-                    )
-                    new_token = drive.get_start_page_token()
-                    _save_cursor(new_token)
-                    with detached_enqueue():
-                        DBOS.enqueue_workflow(POLL_QUEUE_NAME, backfill, correlation_id)
+                plan = _fetch_page_plan(
+                    page_token=page_token,
+                    drive=drive,
+                    settings=settings,
+                    metadata_cache=metadata_cache,
+                )
+                if plan.cursor_expired:
+                    DBOS.enqueue_workflow(POLL_QUEUE_NAME, backfill, correlation_id)
                     _log.info(
                         "poll_changes_recovery_enqueued",
-                        new_cursor=new_token,
+                        new_cursor=plan.new_cursor,
                     )
                     return
 
-                for change in page.changes:
-                    try:
-                        dispatched = _dispatch(
-                            change, cached_get_metadata, settings, correlation_id
-                        )
-                    except DrivePermanentError as exc:
-                        # 4xx from Drive: the file is gone / rejected / forbidden.
-                        # No retry can fix that, so log it and keep processing
-                        # the rest of the page. Transient errors and any other
-                        # exception (DBOS enqueue failure, bug) propagate and
-                        # stall the workflow so DBOS retries from the last
-                        # saved cursor.
-                        _log.warning(
-                            "poll_changes_dispatch_failed",
-                            file_id=change.file_id,
-                            error=str(exc),
-                            error_type=type(exc).__name__,
-                        )
-                        errored += 1
-                        continue
-                    if dispatched:
+                ignored += plan.ignored
+                errored += plan.errored
+                for action in plan.actions:
+                    if _enqueue_action(action, correlation_id):
                         enqueued += 1
                     else:
                         ignored += 1
 
-                if page.next_page_token:
-                    page_token = page.next_page_token
+                if plan.next_page_token:
+                    page_token = plan.next_page_token
                     _save_cursor(page_token)
                     continue
-                if page.new_start_page_token:
-                    page_token = page.new_start_page_token
+                if plan.new_start_page_token:
+                    page_token = plan.new_start_page_token
                     _save_cursor(page_token)
                 break
 
@@ -192,24 +179,93 @@ def seed_cursor(drive: DriveClient) -> None:
     _log.info("cursor_seeded", token=seeded)
 
 
-def _dispatch(
+@DBOS.step()
+def _fetch_page_plan(
+    *,
+    page_token: str,
+    drive: DriveClient,
+    settings: Settings,
+    metadata_cache: dict[str, NoteMetadata],
+) -> _PagePlan:
+    """Fetch one Drive changes page and resolve per-change dispatch actions."""
+
+    def cached_get_metadata(fid: str) -> NoteMetadata:
+        if fid not in metadata_cache:
+            metadata_cache[fid] = drive.get_metadata(fid, fields="id,name,parents")
+        return metadata_cache[fid]
+
+    try:
+        page = drive.changes_list(page_token=page_token)
+    except DrivePermanentError as exc:
+        # A 4xx on `changes.list` almost always means our persisted cursor
+        # is older than Drive's change-log window (docs: tokens more than a
+        # few weeks old can 404). Reset from `getStartPageToken` and let the
+        # enclosing workflow enqueue a backfill.
+        _log.warning(
+            "poll_changes_cursor_expired",
+            cursor=page_token,
+            error=str(exc),
+        )
+        new_token = drive.get_start_page_token()
+        _save_cursor_row(new_token)
+        return _PagePlan(
+            cursor_expired=True,
+            new_cursor=new_token,
+            actions=(),
+            ignored=0,
+            errored=0,
+            next_page_token=None,
+            new_start_page_token=None,
+        )
+
+    actions: list[_ChangeAction] = []
+    ignored = 0
+    errored = 0
+    for change in page.changes:
+        try:
+            action = _resolve_change_action(change, cached_get_metadata, settings)
+        except DrivePermanentError as exc:
+            # 4xx from Drive: the file is gone / rejected / forbidden.
+            # No retry can fix that, so log it and keep processing
+            # the rest of the page. Transient errors propagate out of the
+            # step and stall the workflow so DBOS retries from the last
+            # saved cursor.
+            _log.warning(
+                "poll_changes_dispatch_failed",
+                file_id=change.file_id,
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            errored += 1
+            continue
+        if action is None:
+            ignored += 1
+        else:
+            actions.append(action)
+
+    return _PagePlan(
+        cursor_expired=False,
+        new_cursor=None,
+        actions=tuple(actions),
+        ignored=ignored,
+        errored=errored,
+        next_page_token=page.next_page_token,
+        new_start_page_token=page.new_start_page_token,
+    )
+
+
+def _resolve_change_action(
     change: ChangeEvent,
     get_metadata: Callable[[str], NoteMetadata],
     settings: Settings,
-    correlation_id: str,
-) -> bool:
-    """Enqueue convert_note (or delete_output) for eligible changes."""
+) -> _ChangeAction | None:
     if change.removed or (change.file is not None and change.file.trashed):
         reason = "removed" if change.removed else "trashed"
-        with detached_enqueue():
-            DBOS.enqueue_workflow(DELETE_QUEUE_NAME, delete_output, change.file_id, correlation_id)
-        _log.info(
-            "poll_changes_enqueued",
-            file_id=change.file_id,
+        return _ChangeAction(
             target="delete_output",
+            file_id=change.file_id,
             reason=reason,
         )
-        return True
 
     source_path: str | None = None
     if change.file is not None and change.file.name.lower().endswith(_NOTE_EXTENSION):
@@ -222,38 +278,59 @@ def _dispatch(
         with sql_session() as session:
             existing = conversions.get_by_current_file_id(session, change.file_id)
         if existing is None:
-            return False
-        with detached_enqueue():
-            DBOS.enqueue_workflow(DELETE_QUEUE_NAME, delete_output, change.file_id, correlation_id)
+            return None
+        return _ChangeAction(
+            target="delete_output",
+            file_id=change.file_id,
+            reason="moved_outside_source_folder",
+        )
+
+    return _ChangeAction(
+        target="convert_note",
+        file_id=change.file_id,
+        source_path=source_path,
+    )
+
+
+def _enqueue_action(action: _ChangeAction, correlation_id: str) -> bool:
+    """Enqueue convert_note or delete_output from the workflow orchestration loop."""
+    if action.target == "delete_output":
+        DBOS.enqueue_workflow(DELETE_QUEUE_NAME, delete_output, action.file_id, correlation_id)
         _log.info(
             "poll_changes_enqueued",
-            file_id=change.file_id,
+            file_id=action.file_id,
             target="delete_output",
-            reason="moved_outside_source_folder",
+            reason=action.reason,
         )
         return True
 
+    assert action.source_path is not None
     try:
-        with detached_enqueue(deduplication_id=f"{change.file_id}:{source_path}"):
+        with SetEnqueueOptions(deduplication_id=f"{action.file_id}:{action.source_path}"):
             DBOS.enqueue_workflow(
-                CONVERT_QUEUE_NAME, convert_note, change.file_id, source_path, correlation_id
+                CONVERT_QUEUE_NAME,
+                convert_note,
+                action.file_id,
+                action.source_path,
+                correlation_id,
             )
     except DBOSQueueDeduplicatedError:
         _log.info(
             "poll_changes_convert_deduplicated",
-            file_id=change.file_id,
-            source_path=source_path,
+            file_id=action.file_id,
+            source_path=action.source_path,
         )
         return False
     _log.info(
         "poll_changes_enqueued",
-        file_id=change.file_id,
+        file_id=action.file_id,
         target="convert_note",
-        source_path=source_path,
+        source_path=action.source_path,
     )
     return True
 
 
+@DBOS.step()
 def _load_or_init_cursor(drive: DriveClient) -> str:
     with sql_session() as session:
         record = cursor.get(session)
@@ -264,6 +341,11 @@ def _load_or_init_cursor(drive: DriveClient) -> str:
         return cursor.seed_if_empty(session, token, datetime.now(UTC))
 
 
+@DBOS.step()
 def _save_cursor(page_token: str) -> None:
+    _save_cursor_row(page_token)
+
+
+def _save_cursor_row(page_token: str) -> None:
     with sql_session() as session, session.begin():
         cursor.set_cursor(session, page_token, datetime.now(UTC))

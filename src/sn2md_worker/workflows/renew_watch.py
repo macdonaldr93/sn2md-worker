@@ -17,7 +17,7 @@ from sn2md_worker.state import cursor, watch_channels
 from sn2md_worker.state.watch_channels import NewWatchChannel, WatchChannelView
 from sn2md_worker.workflows.locks import lock_for
 from sn2md_worker.workflows.poll_changes import poll_changes
-from sn2md_worker.workflows.queues import POLL_QUEUE_NAME, detached_enqueue
+from sn2md_worker.workflows.queues import POLL_QUEUE_NAME
 
 __all__ = [
     "RENEWAL_HEADROOM",
@@ -76,34 +76,13 @@ def renew_watch_channel_impl(
                 _log.warning("renew_watch_skipped", reason="no_webhook_url")
                 return
 
-            with lock_for(_WATCH_CHANNEL_LOCK_KEY):
-                with sql_session() as session:
-                    active = watch_channels.get_active(session)
-
-                if active is not None:
-                    url_matches = active.webhook_url == settings.webhook.url
-                    still_fresh = (active.expires_at - now) > RENEWAL_HEADROOM
-                    if url_matches and still_fresh:
-                        _log.info(
-                            "renew_watch_skipped",
-                            reason="still_fresh",
-                            channel_id=active.channel_id,
-                            expires_at=active.expires_at.isoformat(),
-                        )
-                        return
-                    if not url_matches:
-                        _log.info(
-                            "renew_watch_url_changed",
-                            channel_id=active.channel_id,
-                            old_url=active.webhook_url or "<unknown>",
-                            new_url=settings.webhook.url,
-                        )
-                    _try_stop_channel(drive=drive, active=active)
-
-                _create_and_activate(
-                    drive=drive, settings=settings, now=now, trigger=trigger_source
-                )
-            if active is not None:
+            replaced_existing = _renew_channel_step(
+                drive=drive,
+                settings=settings,
+                now=now,
+                trigger_source=trigger_source,
+            )
+            if replaced_existing:
                 # Replaced an existing channel: enqueue a catch-up poll to
                 # cover the seam between the old channel's last delivered
                 # push and the new one going active. First-ever creation
@@ -112,12 +91,53 @@ def renew_watch_channel_impl(
                 # ensure_active_channel's "recovery" poll - harmless, since
                 # poll_queue runs at concurrency 1 and the follow-up poll
                 # is a cheap no-op once the cursor has advanced.
-                with detached_enqueue():
-                    DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, "renewal", correlation_id)
+                DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, "renewal", correlation_id)
             _log.info("renew_watch_succeeded")
         except Exception as exc:
             _log.error("renew_watch_failed", error=str(exc), exc_info=True)
             raise
+
+
+@DBOS.step()
+def _renew_channel_step(
+    *,
+    drive: DriveClient,
+    settings: Settings,
+    now: datetime,
+    trigger_source: str,
+) -> bool:
+    """Check, stop, and replace the active watch channel under the channel lock.
+
+    Returns True when an existing channel was replaced (so the caller
+    should enqueue a catch-up renewal poll), or False when the existing
+    channel is still fresh or a first-ever channel was created.
+    """
+    with lock_for(_WATCH_CHANNEL_LOCK_KEY):
+        with sql_session() as session:
+            active = watch_channels.get_active(session)
+
+        if active is not None:
+            url_matches = active.webhook_url == settings.webhook.url
+            still_fresh = (active.expires_at - now) > RENEWAL_HEADROOM
+            if url_matches and still_fresh:
+                _log.info(
+                    "renew_watch_skipped",
+                    reason="still_fresh",
+                    channel_id=active.channel_id,
+                    expires_at=active.expires_at.isoformat(),
+                )
+                return False
+            if not url_matches:
+                _log.info(
+                    "renew_watch_url_changed",
+                    channel_id=active.channel_id,
+                    old_url=active.webhook_url or "<unknown>",
+                    new_url=settings.webhook.url,
+                )
+            _try_stop_channel(drive=drive, active=active)
+
+        _create_and_activate(drive=drive, settings=settings, now=now, trigger=trigger_source)
+        return active is not None
 
 
 def ensure_active_channel(drive: DriveClient | None, settings: Settings) -> None:
@@ -150,8 +170,7 @@ def ensure_active_channel(drive: DriveClient | None, settings: Settings) -> None
                 channel_id=active.channel_id,
                 expired_at=active.expires_at.isoformat(),
             )
-            with detached_enqueue():
-                DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, "recovery", correlation_id)
+            DBOS.enqueue_workflow(POLL_QUEUE_NAME, poll_changes, "recovery", correlation_id)
 
         renew_watch_channel_impl(
             trigger_source="startup",

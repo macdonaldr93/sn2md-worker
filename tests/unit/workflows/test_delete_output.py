@@ -404,12 +404,12 @@ class TestWhenFindLiveNoteRaisesSourcePermanentError:
             assert conversions.get_by_logical_key(session, LOGICAL_KEY) is not None
 
 
-class TestRepointConvertEnqueueDetachesFromParentWorkflow:
-    def test_detaches_from_parent_workflow_context_when_repointing_to_live_twin(
+class TestRepointConvertEnqueueRunsAfterDbosStep:
+    def test_runs_repoint_or_delete_in_dbos_step_and_enqueues_at_workflow_level(
         self, engine: Engine, settings: Settings, source: MagicMock, vault_root: Path
     ) -> None:
         # GIVEN — a live twin with a different md5 exists in Drive while
-        # delete_output_impl runs inside a parent DBOS workflow context
+        # delete_output_impl runs inside a DBOS workflow context
         _seed_record(engine, file_id="old-file", parent_folder_id="parent-1")
         _seed_output_dir(vault_root)
         source.find_live_note.return_value = NoteMetadata(
@@ -420,30 +420,43 @@ class TestRepointConvertEnqueueDetachesFromParentWorkflow:
         )
         parent_ctx = DBOSContext()
         parent_ctx.workflow_id = "parent-delete-wf"
-        observed_in_workflow: list[bool] = []
-        observed_dedup_ids: list[str | None] = []
+        events: list[tuple[str, str | None]] = []
 
-        def inspect_ctx(*_args: object, **_kwargs: object) -> None:
+        def fake_invoke_step(
+            _dbos: object,
+            _step_ctx: object,
+            func: object,
+            args: tuple[object, ...],
+            kwargs: dict[str, object],
+            *,
+            step_name: str,
+            **_opts: object,
+        ) -> object:
+            events.append(("step", step_name))
+            return func(*args, **kwargs)  # type: ignore[operator]
+
+        def fake_enqueue(*_args: object, **_kwargs: object) -> None:
             ctx = get_local_dbos_context()
-            observed_in_workflow.append(ctx.is_within_workflow() if ctx is not None else False)
-            observed_dedup_ids.append(ctx.deduplication_id if ctx is not None else None)
+            assert ctx is not None and ctx.is_workflow()
+            events.append(("enqueue", ctx.deduplication_id))
 
         # WHEN
         token = _dbos_context_var.set(parent_ctx)
         try:
-            with patch(
-                "sn2md_worker.workflows.delete_output.DBOS.enqueue_workflow",
-                side_effect=inspect_ctx,
+            with (
+                patch("dbos._dbos._dbos_global_registry.dbos", MagicMock()),
+                patch("dbos._core.invoke_step", side_effect=fake_invoke_step),
+                patch(
+                    "sn2md_worker.workflows.delete_output.DBOS.enqueue_workflow",
+                    side_effect=fake_enqueue,
+                ),
             ):
                 delete_output_impl(file_id="old-file", source=source, settings=settings)
-                restored = get_local_dbos_context()
         finally:
             _dbos_context_var.reset(token)
 
-        # THEN — enqueue ran outside parent workflow context with deduplication_id set,
-        # and parent_ctx was restored untouched
-        assert observed_in_workflow == [False]
-        assert observed_dedup_ids == [f"new-file:{LOGICAL_KEY}"]
-        assert restored is parent_ctx
-        assert parent_ctx.workflow_id == "parent-delete-wf"
-        assert parent_ctx.function_id == -1
+        # THEN — repoint check ran in a @DBOS.step(), followed by workflow-level enqueue
+        assert events == [
+            ("step", "_repoint_or_delete_step"),
+            ("enqueue", f"new-file:{LOGICAL_KEY}"),
+        ]
