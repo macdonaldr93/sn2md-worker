@@ -3,7 +3,7 @@
 [![CI](https://github.com/macdonaldr93/sn2md-worker/actions/workflows/ci.yml/badge.svg)](https://github.com/macdonaldr93/sn2md-worker/actions/workflows/ci.yml)
 
 Watches a Google Drive folder for Supernote `.note` files, transcribes
-each page with Gemini 2.5 Pro, and writes the results into an Obsidian
+each page with Gemini, and writes the results into an Obsidian
 vault. Runs as a Docker container (linuxserver-style PUID/PGID), built
 for Unraid but works anywhere Docker does.
 
@@ -40,7 +40,7 @@ page re-transcribes.
 ### Prerequisites
 
 - Docker + Docker Compose (Desktop is fine on macOS / Windows).
-- [`uv`](https://docs.astral.sh/uv/) 0.5+ for local iteration outside
+- [`uv`](https://docs.astral.sh/uv/) for local iteration outside
   the container.
 - A Gemini API key and a Google Cloud service account JSON (see
   [`docs/technical-brief.md#11-prerequisites`](docs/technical-brief.md)

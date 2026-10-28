@@ -137,19 +137,21 @@ sn2md-worker/
 
 ## 3. External dependencies
 
-| Concern            | Library / API                             | Version target   |
-| ------------------ | ----------------------------------------- | ---------------- |
-| HTTP server        | `fastapi` + `uvicorn`                     | current stable   |
-| Config             | `pydantic-settings`                       | v2.x             |
-| Google Drive       | `google-api-python-client`, `google-auth` | current          |
-| Durable workflows  | `dbos` (DBOS Transact)                    | current stable   |
-| Note conversion    | `sn2md` (as library)                      | v2.7.0           |
-| LLM provider       | `llm` + `llm-gemini`                      | llm-gemini ≥0.35 |
-| Structured logging | `structlog` (or stdlib + json formatter)  | latest           |
-| Testing            | `pytest`, `pytest-asyncio`                | current          |
-| Quality            | `ruff`, `mypy`, `pre-commit`              | current          |
+Version constraints live in [`pyproject.toml`](../pyproject.toml) (and
+[`.python-version`](../.python-version)).
 
-Python version pinned to **3.12**.
+| Concern            | Library / API                             |
+| ------------------ | ----------------------------------------- |
+| HTTP server        | `fastapi` + `uvicorn`                     |
+| Config             | `pydantic-settings`                       |
+| Google Drive       | `google-api-python-client`, `google-auth` |
+| Durable workflows  | `dbos` (DBOS Transact)                    |
+| Note conversion    | `sn2md` (as library)                      |
+| LLM provider       | `llm` + `llm-gemini`                      |
+| Structured logging | `structlog`                               |
+| Retries & locking  | `tenacity`, `filelock`                    |
+| Testing            | `pytest`, `pytest-asyncio`, `respx`       |
+| Quality            | `ruff`, `mypy`, `pre-commit`              |
 
 ## 4a. Supernote sync semantics (empirical, 2026-07-04)
 
@@ -540,7 +542,8 @@ layout. Sections:
   `*/5 * * * *`), `backfill_sweep_cron` (default `0 5 * * *`), debounce
   timing knobs (reserved for the deferred `debounce_file` workflow).
 - `[vault]` — `root_path`.
-- `[sn2md]` — `model` (default `gemini/gemini-3.8-flash`), `api_key`
+- `[sn2md]` — `model` (`gemini/<model>` identifier for `llm-gemini`; see
+  `config.example.toml` for the default), `api_key`
   (SecretStr, optional; falls back to `LLM_GEMINI_KEY` env var),
   `prompt` (optional full-prompt override; must include `{context}`).
 - `[queue]` — `convert_concurrency` (default 2).
@@ -824,7 +827,7 @@ verification against live Drive + Gemini uses `scripts/verify/`.
 2. **DBOS runtime shape** — ✅ Runs as an embedded library inside a
    single Python process with SQLite holding both DBOS and application
    tables.
-3. **sn2md-as-library end-to-end** — ✅ `gemini/gemini-2.5-pro` via
-   `llm-gemini` produces Markdown at ~7.5s/page baseline.
+3. **sn2md-as-library end-to-end** — ✅ `sn2md` + `llm-gemini`
+   transcribes `.note` pages to Markdown end-to-end.
 4. **Webhook reachability from Google** — ✅ Confirmed end-to-end in the
    production Unraid deployment behind DNS + reverse proxy.

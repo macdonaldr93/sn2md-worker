@@ -4,7 +4,7 @@ import logging
 
 from sn2md_worker.logging import HealthProbeAccessFilter, configure_logging
 
-# Uvicorn 0.50.0 (`protocols/http/h11_impl.py`) logs every access line as
+# Uvicorn (`protocols/http/h11_impl.py`) logs every access line as
 # `access_logger.info('%s - "%s %s HTTP/%s" %d', client_addr, method,
 # path_with_query_string, http_version, status_code)`. The helpers below
 # build LogRecords with that exact msg/args shape so these tests pin the

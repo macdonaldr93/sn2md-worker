@@ -147,7 +147,7 @@ against real APIs:
 - `01_drive_access.py` — service account can see + poll changes on a
   personal Drive folder shared to it.
 - `02_sn2md_gemini.py` — sn2md's Python API produces sensible Markdown
-  via `gemini/gemini-3.8-flash` (uses sn2md's high-level single-file API;
+  via Gemini (uses sn2md's high-level single-file API;
   the running worker uses per-page extraction and transcription instead).
 
 ## Coding conventions honored across this project

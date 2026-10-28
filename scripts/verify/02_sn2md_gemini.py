@@ -7,7 +7,7 @@
 # ///
 """
 Verify that sn2md's Python API converts a .note file to Markdown using
-Gemini 3.8 Flash via the llm-gemini plugin.
+Gemini via the llm-gemini plugin.
 
 See scripts/verify/README.md for setup.
 """
@@ -40,7 +40,8 @@ def main() -> int:
     if not api_key:
         die("LLM_GEMINI_KEY not set")
 
-    model = os.environ.get("SN2MD_MODEL", "gemini/gemini-3.8-flash")
+    default_model = "gemini/gemini-3.8-flash"
+    model = os.environ.get("SN2MD_MODEL", default_model)
 
     # Imports deferred so a missing env var reports before an import
     # traceback confuses the user.
@@ -69,7 +70,7 @@ def main() -> int:
         except Exception as e:
             print(f"\nsn2md raised: {type(e).__name__}: {e}", file=sys.stderr)
             print(
-                "if this is a model-name error, try SN2MD_MODEL=gemini/gemini-3.8-flash",
+                f"if this is a model-name error, try SN2MD_MODEL={default_model}",
                 file=sys.stderr,
             )
             return 1
