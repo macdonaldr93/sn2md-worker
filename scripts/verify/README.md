@@ -82,10 +82,9 @@ file using `llm-gemini`.
 
 ```sh
 export LLM_GEMINI_KEY=your-key
-# Model string. Confirmed 2026-07-04 that llm-gemini requires the
-# prefixed "gemini/..." form. The script defaults to
-# "gemini/gemini-3.8-flash"; override only if trying a different model.
-# export SN2MD_MODEL=gemini/gemini-3.8-flash
+# Optional: override the default Gemini model (llm-gemini requires the
+# prefixed "gemini/<model>" form).
+# export SN2MD_MODEL=gemini/<model>
 ```
 
 ### Run

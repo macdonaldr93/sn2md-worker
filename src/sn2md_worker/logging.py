@@ -18,7 +18,7 @@ _FIRST_ERROR_STATUS = 400
 class HealthProbeAccessFilter(logging.Filter):
     """Drop uvicorn.access records for successful health-probe requests.
 
-    Uvicorn (0.50.0, `protocols/http/h11_impl.py`) emits access lines as
+    Uvicorn (`protocols/http/h11_impl.py`) emits access lines as
     `access_logger.info('%s - "%s %s HTTP/%s" %d', client_addr, method,
     path_with_query_string, http_version, status_code)`. Container
     healthchecks hit `/healthz` every 30s, flooding the log with

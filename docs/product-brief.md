@@ -19,7 +19,7 @@ Runs continuously as a Docker container on my Unraid server.
    arrives, so the pipeline no longer depends solely on Google
    delivering notifications.
 4. `convert_note` downloads the file, extracts each page's PNG, calls
-   Gemini 2.5 Pro only for pages whose hash has changed since the last
+   Gemini only for pages whose hash has changed since the last
    conversion (via the `page_conversions` cache table), and writes one
    Markdown file per page plus an `index.md` under a per-note folder
    that mirrors the Drive layout.
@@ -111,7 +111,8 @@ Runs continuously as a Docker container on my Unraid server.
 
 ### LLM / sn2md
 
-- **Model**: `gemini/gemini-3.8-flash` (via `llm-gemini` plugin ≥0.35).
+- **Model**: Configurable Gemini model via the `llm-gemini` plugin (see
+  `config.example.toml` for the default `sn2md.model`).
 - **Prompt**: sn2md's default Markdown template augmented with stricter
   ASCII-only Mermaid and CommonMark escaping guidance (overridable via
   `sn2md.prompt` in config).
@@ -232,9 +233,8 @@ Runs continuously as a Docker container on my Unraid server.
    `changes.list` feed. Bonus finding: Supernote's device-sync flow
    replaces the Drive file (new `fileId`) rather than updating in
    place — reflected in tech-brief §4a.
-2. **sn2md + Gemini end-to-end** — verified 2026-07-04. Model string
-   `gemini/gemini-2.5-pro` (prefixed form required by llm-gemini
-   ≥0.32). Baseline ~7.5s per page against Gemini 2.5 Pro.
+2. **sn2md + Gemini end-to-end** — verified via `scripts/verify/02_sn2md_gemini.py`.
+   `llm-gemini` requires the prefixed `gemini/<model>` model string.
 3. **DBOS + SQLite** — supported with `use_listen_notify=False`.
    Postgres is DBOS's recommended production backend; SQLite is our
    zero-infrastructure tradeoff. Runs as an embedded library inside a
@@ -244,6 +244,5 @@ Runs continuously as a Docker container on my Unraid server.
 5. **Live conversion** — verified via ngrok deploy: Supernote edit →
    Drive push → `poll_changes` → `convert_note` → `page-NN.md` in the
    vault. Webhook reachability in the real deployment (production DNS
-   + reverse proxy on Unraid) confirmed 2026-07-12. Multi-arch images
-   have been publishing to GHCR since v0.1.0 (2026-07-05); v0.2.0
-   followed on 2026-07-11.
+   + reverse proxy on Unraid) and automated multi-arch image publishing
+   to GHCR are confirmed end-to-end.
