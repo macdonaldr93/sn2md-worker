@@ -66,3 +66,40 @@ class TestCursorSingletonConstraint:
         # THEN — the CHECK constraint catches it before commit
         with pytest.raises(IntegrityError):
             session.flush()
+
+
+class TestSeedIfEmpty:
+    def test_creates_singleton_row_and_returns_token_when_empty(self, session: Session) -> None:
+        # GIVEN — no cursor row exists
+        when = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+
+        # WHEN
+        returned = cursor.seed_if_empty(session, "SEED-1", when)
+        session.flush()
+
+        # THEN
+        assert returned == "SEED-1"
+        got = cursor.get(session)
+        assert got is not None
+        assert got.page_token == "SEED-1"
+        assert got.last_polled_at == when
+
+    def test_preserves_existing_cursor_and_returns_existing_token_on_conflict(
+        self, session: Session
+    ) -> None:
+        # GIVEN — another workflow already seeded or advanced the cursor
+        first = datetime(2026, 7, 4, 12, 0, tzinfo=UTC)
+        later = datetime(2026, 7, 4, 12, 5, tzinfo=UTC)
+        cursor.set_cursor(session, "ADVANCED-99", first)
+        session.flush()
+
+        # WHEN — a concurrent caller attempts to seed an initial token
+        returned = cursor.seed_if_empty(session, "STALE-SEED-1", later)
+        session.flush()
+
+        # THEN — the existing cursor is not overwritten
+        assert returned == "ADVANCED-99"
+        got = cursor.get(session)
+        assert got is not None
+        assert got.page_token == "ADVANCED-99"
+        assert got.last_polled_at == first

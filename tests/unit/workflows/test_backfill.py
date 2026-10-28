@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from dbos._context import get_local_dbos_context
+from dbos._context import DBOSContext, _dbos_context_var, get_local_dbos_context
 from dbos._error import DBOSQueueDeduplicatedError
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
@@ -354,4 +354,55 @@ class TestBackfillConvertEnqueueDeduplication:
         assert observed_dedup_ids == [
             "f1:Notebooks/2026-07.note",
             "f2:Notebooks/2026-08.note",
+        ]
+
+    def test_collects_backfill_plan_in_dbos_step_and_enqueues_at_workflow_level(
+        self, engine: Engine, settings: Settings, source: MagicMock
+    ) -> None:
+        # GIVEN — backfill_impl runs inside a DBOS workflow context
+        source.list_all_notes.return_value = iter(
+            [_listed("f1", "Notebooks/2026-07.note", name="2026-07.note")]
+        )
+        parent_ctx = DBOSContext()
+        parent_ctx.workflow_id = "parent-backfill-wf"
+        events: list[tuple[str, str | None]] = []
+
+        def fake_invoke_step(
+            _dbos: object,
+            _step_ctx: object,
+            func: object,
+            args: tuple[object, ...],
+            kwargs: dict[str, object],
+            *,
+            step_name: str,
+            **_opts: object,
+        ) -> object:
+            events.append(("step", step_name))
+            return func(*args, **kwargs)  # type: ignore[operator]
+
+        def fake_enqueue(*_args: object, **_kwargs: object) -> None:
+            ctx = get_local_dbos_context()
+            assert ctx is not None and ctx.is_workflow()
+            events.append(("enqueue", ctx.deduplication_id))
+
+        # WHEN
+        token = _dbos_context_var.set(parent_ctx)
+        try:
+            with (
+                patch("dbos._dbos._dbos_global_registry.dbos", MagicMock()),
+                patch("dbos._core.invoke_step", side_effect=fake_invoke_step),
+                patch(
+                    "sn2md_worker.workflows.backfill.DBOS.enqueue_workflow",
+                    side_effect=fake_enqueue,
+                ),
+            ):
+                backfill_impl(source=source, settings=settings)
+        finally:
+            _dbos_context_var.reset(token)
+
+        # THEN — Drive/SQLite collection ran as a @DBOS.step(), followed by
+        # workflow-level enqueue with deduplication_id set
+        assert events == [
+            ("step", "_collect_backfill_plan"),
+            ("enqueue", "f1:Notebooks/2026-07.note"),
         ]

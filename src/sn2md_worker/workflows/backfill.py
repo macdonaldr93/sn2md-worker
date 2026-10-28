@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 
 import structlog
@@ -17,11 +18,27 @@ from sn2md_worker.state import conversions
 from sn2md_worker.state.conversions import ConversionRecordView
 from sn2md_worker.state.models import ConversionStatus
 from sn2md_worker.workflows.convert_note import convert_note
-from sn2md_worker.workflows.queues import CONVERT_QUEUE_NAME, POLL_QUEUE_NAME
+from sn2md_worker.workflows.queues import (
+    CONVERT_QUEUE_NAME,
+    POLL_QUEUE_NAME,
+)
 
 __all__ = ["backfill", "backfill_impl", "scheduled_backfill"]
 
 _log = get_logger("sn2md_worker.workflows.backfill")
+
+
+@dataclass(frozen=True, slots=True)
+class _BackfillTarget:
+    file_id: str
+    source_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class _BackfillPlan:
+    targets: tuple[_BackfillTarget, ...] = ()
+    skipped: int = 0
+    unsafe: int = 0
 
 
 @DBOS.workflow()
@@ -76,54 +93,81 @@ def backfill_impl(
                 _log.warning("backfill_skipped", reason="no_source_folder")
                 return
 
-            with sql_session() as session:
-                existing = conversions.list_all_by_key(session)
+            plan = _collect_backfill_plan(
+                source=source,
+                source_folder_id=settings.drive.source_folder_id,
+            )
 
             enqueued = 0
-            skipped = 0
-            unsafe = 0
-            for listed in source.list_all_notes(settings.drive.source_folder_id):
-                file = listed.metadata
-                source_path = listed.source_path
+            skipped = plan.skipped
+            for target in plan.targets:
                 try:
-                    key = logical_key(source_path)
-                except UnsafePathError as exc:
-                    # One bad name shouldn't abort the whole backfill.
-                    _log.warning(
-                        "backfill_skipped_unsafe_path",
-                        source_path=source_path,
-                        file_id=file.id,
-                        error=str(exc),
-                    )
-                    unsafe += 1
-                    continue
-
-                if _needs_conversion(existing.get(key), file_id=file.id, md5=file.md5_checksum):
-                    try:
-                        with SetEnqueueOptions(deduplication_id=f"{file.id}:{source_path}"):
-                            DBOS.enqueue_workflow(
-                                CONVERT_QUEUE_NAME,
-                                convert_note,
-                                file.id,
-                                source_path,
-                                correlation_id,
-                            )
-                    except DBOSQueueDeduplicatedError:
-                        _log.info(
-                            "backfill_convert_deduplicated",
-                            file_id=file.id,
-                            source_path=source_path,
+                    with SetEnqueueOptions(
+                        deduplication_id=f"{target.file_id}:{target.source_path}"
+                    ):
+                        DBOS.enqueue_workflow(
+                            CONVERT_QUEUE_NAME,
+                            convert_note,
+                            target.file_id,
+                            target.source_path,
+                            correlation_id,
                         )
-                        skipped += 1
-                        continue
-                    enqueued += 1
-                else:
+                except DBOSQueueDeduplicatedError:
+                    _log.info(
+                        "backfill_convert_deduplicated",
+                        file_id=target.file_id,
+                        source_path=target.source_path,
+                    )
                     skipped += 1
+                    continue
+                enqueued += 1
 
-            _log.info("backfill_succeeded", enqueued=enqueued, skipped=skipped, unsafe=unsafe)
+            _log.info(
+                "backfill_succeeded",
+                enqueued=enqueued,
+                skipped=skipped,
+                unsafe=plan.unsafe,
+            )
         except Exception as exc:
             _log.error("backfill_failed", error=str(exc), exc_info=True)
             raise
+
+
+@DBOS.step()
+def _collect_backfill_plan(
+    *,
+    source: NoteSource,
+    source_folder_id: str,
+) -> _BackfillPlan:
+    """Scan Drive and SQLite in a single step and return the backfill plan."""
+    with sql_session() as session:
+        existing = conversions.list_all_by_key(session)
+
+    targets: list[_BackfillTarget] = []
+    skipped = 0
+    unsafe = 0
+    for listed in source.list_all_notes(source_folder_id):
+        file = listed.metadata
+        source_path = listed.source_path
+        try:
+            key = logical_key(source_path)
+        except UnsafePathError as exc:
+            # One bad name shouldn't abort the whole backfill.
+            _log.warning(
+                "backfill_skipped_unsafe_path",
+                source_path=source_path,
+                file_id=file.id,
+                error=str(exc),
+            )
+            unsafe += 1
+            continue
+
+        if _needs_conversion(existing.get(key), file_id=file.id, md5=file.md5_checksum):
+            targets.append(_BackfillTarget(file_id=file.id, source_path=source_path))
+        else:
+            skipped += 1
+
+    return _BackfillPlan(targets=tuple(targets), skipped=skipped, unsafe=unsafe)
 
 
 def _needs_conversion(

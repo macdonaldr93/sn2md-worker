@@ -71,6 +71,9 @@ def _configure_sqlite_connection(dbapi_conn: Any, _record: Any) -> None:
     """
     if not isinstance(dbapi_conn, sqlite3.Connection):
         return
+    # Use IMMEDIATE transactions to serialize writers and respect busy_timeout
+    # (matches DBOS's own SQLite listener in dbos/_sys_db_sqlite.py).
+    dbapi_conn.isolation_level = "IMMEDIATE"
     cursor = dbapi_conn.cursor()
     try:
         cursor.execute("PRAGMA journal_mode=WAL")

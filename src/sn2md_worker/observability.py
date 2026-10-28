@@ -112,7 +112,7 @@ async def healthz() -> HealthResponse:
 
 
 @router.get("/readyz", responses={200: {"model": HealthResponse}, 503: {}})
-async def readyz() -> Response:
+def readyz() -> Response:
     """Readiness probe.
 
     - Dev mode (`webhook.url` empty): 200 as long as the app is up.
@@ -148,7 +148,7 @@ async def readyz() -> Response:
 
 
 @router.get("/status", response_model=StatusResponse)
-async def get_status() -> StatusResponse:
+def get_status() -> StatusResponse:
     """Operational snapshot: recent conversions/failures, watch channel, cursor."""
     settings = get_settings()
     if not settings.observability.status_endpoint_enabled:

@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from sn2md_worker.__main__ import (
+    DBOS_APPLICATION_VERSION,
     _dbos_config,
     _prepare_sqlite_dir,
     _run_boot_step,
@@ -80,6 +81,18 @@ class TestDbosConfigForcesCheckSameThreadFalseOnSqlite:
 
         # THEN — no override; DBOS uses its Postgres defaults
         assert "db_engine_kwargs" not in config
+
+    def test_pins_application_version_so_deploys_do_not_orphan_workflows(self) -> None:
+        # GIVEN
+        settings = Settings(database=DatabaseConfig(url="sqlite:////data/app.sqlite"))
+
+        # WHEN
+        config = _dbos_config(settings)
+
+        # THEN — application_version is explicitly pinned instead of left to
+        # DBOS's source-code MD5 hash across deploys.
+        assert config.get("application_version") == DBOS_APPLICATION_VERSION
+        assert DBOS_APPLICATION_VERSION == "1"
 
 
 class TestRunBootStepDefersWhenPrerequisiteMissing:

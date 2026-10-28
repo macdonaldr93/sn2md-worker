@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from dbos._context import DBOSContext, _dbos_context_var, get_local_dbos_context
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session
 
@@ -16,6 +17,7 @@ from sn2md_worker.drive.models import ChannelInfo
 from sn2md_worker.state import cursor, watch_channels
 from sn2md_worker.state.models import Base
 from sn2md_worker.state.watch_channels import NewWatchChannel
+from sn2md_worker.workflows.locks import lock_for
 from sn2md_worker.workflows.poll_changes import poll_changes
 from sn2md_worker.workflows.queues import POLL_QUEUE_NAME
 from sn2md_worker.workflows.renew_watch import (
@@ -497,3 +499,120 @@ class TestEnsureActiveChannelWhenPreviousChannelHasExpired:
 
         # THEN — no recovery poll enqueued (channel is fresh)
         enqueue.assert_not_called()
+
+
+class TestRenewWatchConcurrencyAndCursorSafety:
+    def test_acquires_watch_channel_lock_around_renewal(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — no active channel yet
+        with patch(
+            "sn2md_worker.workflows.renew_watch.lock_for",
+            wraps=lock_for,
+        ) as spy_lock:
+            # WHEN
+            renew_watch_channel_impl(
+                trigger_source="test",
+                drive=drive,
+                settings=settings,
+                now=NOW,
+            )
+
+        # THEN — the singleton watch-channel lock serialized the renewal
+        spy_lock.assert_called_once_with("__watch_channel__")
+
+    def test_does_not_overwrite_cursor_advanced_concurrently_during_start_page_token_fetch(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — cursor table starts empty, and while get_start_page_token()
+        # is in flight, a concurrent poll_changes writes a newer token "ADVANCED-50".
+        def race_start_token() -> str:
+            with Session(engine) as sess, sess.begin():
+                cursor.set_cursor(sess, "ADVANCED-50", NOW)
+            return "STALE-SEED-1"
+
+        drive.get_start_page_token.side_effect = race_start_token
+
+        # WHEN
+        renew_watch_channel_impl(
+            trigger_source="test",
+            drive=drive,
+            settings=settings,
+            now=NOW,
+        )
+
+        # THEN — the cursor remains "ADVANCED-50" and watch_changes used it
+        with Session(engine) as sess:
+            saved = cursor.get(sess)
+        assert saved is not None
+        assert saved.page_token == "ADVANCED-50"
+        assert drive.watch_changes.call_args.kwargs["start_page_token"] == "ADVANCED-50"
+
+    def test_runs_channel_renewal_in_dbos_step_and_enqueues_catchup_poll_at_workflow_level(
+        self, engine: Engine, settings: Settings, drive: MagicMock
+    ) -> None:
+        # GIVEN — an expiring channel exists and renew_watch_channel_impl runs
+        # inside a DBOS workflow context
+        with Session(engine) as session, session.begin():
+            watch_channels.create(
+                session,
+                NewWatchChannel(
+                    channel_id="expiring",
+                    resource_id="res-old",
+                    token="old-token",
+                    webhook_url=settings.webhook.url,
+                    expires_at=NOW + timedelta(hours=12),
+                    start_page_token="SPT-OLD",
+                    created_at=NOW - timedelta(days=6),
+                ),
+            )
+            watch_channels.mark_active(session, "expiring")
+
+        parent_ctx = DBOSContext()
+        parent_ctx.workflow_id = "parent-renew-wf"
+        events: list[tuple[str, str]] = []
+
+        def fake_invoke_step(
+            _dbos: object,
+            _step_ctx: object,
+            func: object,
+            args: tuple[object, ...],
+            kwargs: dict[str, object],
+            *,
+            step_name: str,
+            **_opts: object,
+        ) -> object:
+            events.append(("step", step_name))
+            return func(*args, **kwargs)  # type: ignore[operator]
+
+        def fake_enqueue(*args: object, **_kwargs: object) -> None:
+            ctx = get_local_dbos_context()
+            assert ctx is not None and ctx.is_workflow()
+            events.append(("enqueue", str(args[2])))
+
+        # WHEN
+        token = _dbos_context_var.set(parent_ctx)
+        try:
+            with (
+                patch("dbos._dbos._dbos_global_registry.dbos", MagicMock()),
+                patch("dbos._core.invoke_step", side_effect=fake_invoke_step),
+                patch(
+                    "sn2md_worker.workflows.renew_watch.DBOS.enqueue_workflow",
+                    side_effect=fake_enqueue,
+                ),
+            ):
+                renew_watch_channel_impl(
+                    trigger_source="test",
+                    drive=drive,
+                    settings=settings,
+                    now=NOW,
+                )
+        finally:
+            _dbos_context_var.reset(token)
+
+        # THEN — channel check/stop/create ran as a @DBOS.step(), followed by
+        # workflow-level enqueue of the renewal catch-up poll
+        assert events == [
+            ("step", "_renew_channel_step"),
+            ("enqueue", "renewal"),
+        ]

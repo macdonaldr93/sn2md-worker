@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +13,7 @@ from sn2md_worker.workflows import (
     RENEW_SCHEDULE_CRON,
     RENEW_SCHEDULE_NAME,
     backfill,
+    cancel_stale_version_workflows,
     enqueue_startup_backfill,
     register_schedules,
     renew_watch_channel,
@@ -204,3 +206,51 @@ class TestEnqueueStartupBackfill:
         assert args[1] is backfill
         assert isinstance(args[2], str)
         assert args[2]
+
+
+class TestCancelStaleVersionWorkflows:
+    def test_cancels_only_active_workflows_from_a_different_application_version(self) -> None:
+        # GIVEN — two stale workflows from old auto-hashed versions and one
+        # active workflow matching the current application_version "1"
+        active_rows = [
+            SimpleNamespace(workflow_id="wf-old-1", app_version="0193a8b9c0d1"),
+            SimpleNamespace(workflow_id="wf-current", app_version="1"),
+            SimpleNamespace(workflow_id="wf-old-2", app_version="deadbeef1234"),
+        ]
+
+        with (
+            patch("dbos._utils.GlobalParams.app_version", "1"),
+            patch(
+                "sn2md_worker.workflows.DBOS.list_workflows",
+                return_value=active_rows,
+            ) as list_wfs,
+            patch("sn2md_worker.workflows.DBOS.cancel_workflows") as cancel_wfs,
+        ):
+            # WHEN
+            cancel_stale_version_workflows()
+
+        # THEN — only the mismatched workflow IDs were cancelled
+        list_wfs.assert_called_once_with(
+            status=["ENQUEUED", "PENDING", "DELAYED"],
+            load_input=False,
+            load_output=False,
+        )
+        cancel_wfs.assert_called_once_with(["wf-old-1", "wf-old-2"])
+
+    def test_is_noop_when_all_active_workflows_match_current_version(self) -> None:
+        # GIVEN — only current-version active workflows exist
+        active_rows = [SimpleNamespace(workflow_id="wf-current", app_version="1")]
+
+        with (
+            patch("dbos._utils.GlobalParams.app_version", "1"),
+            patch(
+                "sn2md_worker.workflows.DBOS.list_workflows",
+                return_value=active_rows,
+            ),
+            patch("sn2md_worker.workflows.DBOS.cancel_workflows") as cancel_wfs,
+        ):
+            # WHEN
+            cancel_stale_version_workflows()
+
+        # THEN
+        cancel_wfs.assert_not_called()
