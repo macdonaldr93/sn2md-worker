@@ -41,8 +41,10 @@ input/output check with no scenario framing.
 - `settings` fixture uses `Settings(...)` with explicit sub-model
   overrides — pydantic-settings' env sources still fire but explicit
   kwargs win.
-- `drive` fixture is a `MagicMock(spec=DriveClient)` — methods you use
-  should have `.return_value` or `.side_effect` set inside `# GIVEN`.
+- `source` / `drive` fixtures use `MagicMock(spec=NoteSource)` (for
+  conversion workflows) or `MagicMock(spec=DriveClient)` (for Drive
+  change-feed/watch workflows) — configure `.return_value` or
+  `.side_effect` inside `# GIVEN`.
 
 ## Patching external calls
 

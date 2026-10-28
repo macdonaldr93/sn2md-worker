@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
 
+from sn2md_worker import __version__
 from sn2md_worker.__main__ import (
     DBOS_APPLICATION_VERSION,
     _dbos_config,
@@ -194,3 +196,13 @@ class TestDockerComposeHealthcheckSetsExplicitTimeoutOnUrlopen:
         # THEN — the healthcheck python command specifies an explicit socket timeout
         # on urlopen so a hung HTTP worker does not leave an orphan probe process.
         assert "u.urlopen('http://localhost:8080/healthz', timeout=" in compose_text
+
+
+class TestPackageVersionMatchesPyproject:
+    def test_version_matches_pyproject_toml(self) -> None:
+        # GIVEN
+        repo_root = Path(__file__).resolve().parents[2]
+        pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+
+        # THEN
+        assert __version__ == pyproject["project"]["version"]

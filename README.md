@@ -63,7 +63,7 @@ git clone https://github.com/macdonaldr93/sn2md-worker.git
 cd sn2md-worker
 
 uv sync                        # installs deps + the local package into .venv
-uv run pytest                  # 206 tests, in-memory SQLite, no network
+uv run pytest                  # in-memory SQLite, no network
 uv run pre-commit install      # ruff + mypy + hygiene on every commit
 ```
 
@@ -205,19 +205,3 @@ Two overlapping surfaces:
 | `/data`                         | DBOS + application SQLite state (writable) |
 | `/vault`                        | Obsidian vault directory (writable)        |
 | `/secrets/service-account.json` | Google service account JSON (read-only)    |
-
-## Status
-
-- ✅ M0 — verification scripts, service-account changes feed +
-  sn2md/Gemini proven end-to-end.
-- ✅ M1 — FastAPI + DBOS + health endpoints + Drive client +
-  authenticated `/webhooks/drive`.
-- ✅ M2 — conversion path with per-page caching (one `page-NN.md` per
-  page + `index.md`).
-- ✅ M3 — `poll_changes`, `renew_watch_channel` (auto-renews on URL
-  change), `delete_output`, `backfill`.
-- ✅ M4 — `/status` (with `queue_depth` + `backfill`), real
-  `/readyz`, Docker image, CI, multi-arch release workflow,
-  structured logs with correlation IDs.
-- 🚧 Remaining polish tracked in
-  [`docs/technical-brief.md#17-milestones`](docs/technical-brief.md).
