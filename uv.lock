@@ -271,11 +271,11 @@ wheels = [
 
 [[package]]
 name = "condense-json"
-version = "0.1.3"
+version = "1.1"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/94/b3/d784cbc05556192ea1e798cae96363835d649fe7420ff030190789645be1/condense_json-0.1.3.tar.gz", hash = "sha256:25fe8d434fdafd849e8d98f21a3e18f96ae2d6dbc2c17565f29e4843d039d2bc", size = 8697, upload-time = "2025-05-13T17:10:03.254Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d1/a5/7158b674fa5b890d80faaf42dd438d1a765661cd22430ddf499759cf44e1/condense_json-1.1.tar.gz", hash = "sha256:c455b54bbbab89a69f598b09f2003a89b738df20d30e6aa341c495401ec5b349", size = 25331, upload-time = "2026-08-03T04:57:30.744Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/28/5f/63badd4924358fad1efa6defd66eef700ccf8783c0e44098987f867e8b1f/condense_json-0.1.3-py3-none-any.whl", hash = "sha256:e0a3d42db4f44a89e74af8737d8e517e97420be0f7e5437087f4decfd38c3366", size = 8432, upload-time = "2025-05-13T17:10:01.665Z" },
+    { url = "https://files.pythonhosted.org/packages/3b/87/48a56644104246d58612ee1fd0c7983d43331f5b889e60b75b4a1df02cfc/condense_json-1.1-py3-none-any.whl", hash = "sha256:8a59e214643d92b7daf360a8e6601040e535d8b9925ff6b34bb723d8fbc62f48", size = 15870, upload-time = "2026-08-03T04:57:29.402Z" },
 ]
 
 [[package]]
@@ -365,15 +365,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c9/02/bd72be9134d25ed783ecbbc38a539ffaefbf90c78418c7fb7229600dbac7/distlib-0.4.3.tar.gz", hash = "sha256:f152097224a0ae24be5a0f6bae1b9359af82133bce63f98a95f86cae1aede9ed", size = 615141, upload-time = "2026-06-12T08:04:52.847Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/02/08/9c41fb51ab5b43eb21674aff13df270e8ba6c4b29c8624e328dc7a9482af/distlib-0.4.3-py2.py3-none-any.whl", hash = "sha256:4b0ce306c966eb73bc3a7b6abad017c556dadd92c44701562cd528ac7fde4d5b", size = 470628, upload-time = "2026-06-12T08:04:50.506Z" },
-]
-
-[[package]]
-name = "distro"
-version = "1.9.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/fc/f8/98eea607f65de6527f8a2e8885fc8015d3e6f5775df186e443e0964a11c3/distro-1.9.0.tar.gz", hash = "sha256:2fa77c6fd8940f116ee1d6b94a2f90b13b5ea8d019b98bc8bafdcabcdd9bdbed", size = 60722, upload-time = "2023-12-24T09:54:32.31Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/12/b3/231ffd4ab1fc9d679809f356cebee130ac7daa00d6d6f3206dd4fd137e9e/distro-1.9.0-py3-none-any.whl", hash = "sha256:7bffd925d65168f85027d8da9af6bddab658135b840670a223589bc0c8ef02b2", size = 20277, upload-time = "2023-12-24T09:54:30.421Z" },
 ]
 
 [[package]]
@@ -902,12 +893,13 @@ wheels = [
 
 [[package]]
 name = "llm"
-version = "0.31"
+version = "0.36"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "click-default-group" },
     { name = "condense-json" },
+    { name = "httpx2" },
     { name = "openai" },
     { name = "pip" },
     { name = "pluggy" },
@@ -917,26 +909,26 @@ dependencies = [
     { name = "python-ulid" },
     { name = "pyyaml" },
     { name = "setuptools" },
-    { name = "sqlite-migrate" },
     { name = "sqlite-utils" },
+    { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7d/f2/3a81744fdaf3a92fe9020dc298dd2e4c144e2e7fcab863e1a132ea537cab/llm-0.31.tar.gz", hash = "sha256:c7701408fdc53cbdf1db6a43f35c7dd410c291dda36cc38a14db4b482b274fa4", size = 86505, upload-time = "2026-04-24T23:37:24.579Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/93/5e/7d5e3c85a64b7b08d74ff6332ece77685383261575c693ed694f0f9c2e78/llm-0.36.tar.gz", hash = "sha256:e59ad30875a99be2eea0c880543b1ebfe40eea24ae55d4008eb1e12c77964626", size = 154890, upload-time = "2026-09-22T18:52:02.475Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/41/5d/033f0a2ba2fd952323d9b6434f653755ac1ce2e42f23c43579d47b008660/llm-0.31-py3-none-any.whl", hash = "sha256:10fabf61f60869a3ff90383f020ad8c787503c53f706eef4477a262d856c18ff", size = 83919, upload-time = "2026-04-24T23:37:23.294Z" },
+    { url = "https://files.pythonhosted.org/packages/37/3d/3095e229af58a0c93feb111eb67123367d61aeafdb9d02720ff9fb33d7ab/llm-0.36-py3-none-any.whl", hash = "sha256:801263d046854d15e3f45ee8da5024c23c313d129f67c7c93961649c531bb050", size = 146562, upload-time = "2026-09-22T18:52:00.774Z" },
 ]
 
 [[package]]
 name = "llm-gemini"
-version = "0.32"
+version = "0.35"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "ijson" },
     { name = "llm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/6a/ad/d2082db62a9301a962bed8b3e769d12755c7975a113811bd17996301ee02/llm_gemini-0.32.tar.gz", hash = "sha256:de51b03309590c36bbff42aa1aab66384f7549725c43a8cd6dbaa5dfb9b61007", size = 23309, upload-time = "2026-05-19T23:47:23.72Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/be/cc/336226070d3ccaa7ecc7568c401ee14d685c27b0a558c23d3891ca8a5a37/llm_gemini-0.35.tar.gz", hash = "sha256:b1890f3adaf7bc7b496c4eba0e35c96277aa476554ac09c1f0223b65d31afcf1", size = 28059, upload-time = "2026-10-13T22:30:01.312Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/6c/80d01107144165d43089614ff2977bdb1ae8dcc9781e5ebeae7f6b1f1e7e/llm_gemini-0.32-py3-none-any.whl", hash = "sha256:69d82aff597eda8eaca62bd0e805bbb9b06035c138dbb7874c1ad0e95ed32dac", size = 17797, upload-time = "2026-05-19T23:47:22.303Z" },
+    { url = "https://files.pythonhosted.org/packages/86/75/0d1e1627e58e6c4281a03436715ce8109081e04c55804ba323aedc45c7ff/llm_gemini-0.35-py3-none-any.whl", hash = "sha256:b856e8b000a36216efa5661b6f6ca8e00adb5f9d01ec5dd53cf1deacc2e6eca8", size = 19958, upload-time = "2026-10-13T22:29:59.993Z" },
 ]
 
 [[package]]
@@ -1218,21 +1210,19 @@ wheels = [
 
 [[package]]
 name = "openai"
-version = "2.44.0"
+version = "3.40.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
-    { name = "distro" },
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "jiter" },
     { name = "pydantic" },
     { name = "sniffio" },
-    { name = "tqdm" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/49/f5/7c7cb955305cb41f7f3c5fd7e0e38bf6bbf2658468863d4b7b868a5cb8df/openai-2.44.0.tar.gz", hash = "sha256:68a5a5ffad82b8ff7d451c437529fb64f7c3b8123aaf0c021966a882d9e3947d", size = 988753, upload-time = "2026-06-24T20:56:02.293Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/31/ce/5b2e20d41c4e82dbb4be0192c62ce53516111896f642466fa71b82dccf0f/openai-3.40.0.tar.gz", hash = "sha256:df309d434130e89a23e9c687fc4bcd3df0df705a33d3872503c87448df69f56f", size = 2391443, upload-time = "2026-10-27T15:38:54.916Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ae/f4/561ed79fd94876160018a5e75254cfcb9b0e62d4dded9dcb20072e86d623/openai-2.44.0-py3-none-any.whl", hash = "sha256:0a2a3ab2e29aeda368700f662ff9ba0f9df17ba4c54577a64e08b8115a3cc0ad", size = 1366216, upload-time = "2026-06-24T20:55:58.882Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/d2/b59435562e893730bb620c720ddaaa84b016e870c9b7b6b85fb505540bdc/openai-3.40.0-py3-none-any.whl", hash = "sha256:dfcfd4f65ee5a8bb824da90c9ad7fa0dda7f3bd472a7c564dffc6183f0a0b55c", size = 2353063, upload-time = "2026-10-27T15:38:52.679Z" },
 ]
 
 [[package]]
@@ -1941,7 +1931,7 @@ requires-dist = [
     { name = "filelock", specifier = ">=3.29.5" },
     { name = "google-api-python-client", specifier = ">=2.150" },
     { name = "google-auth", specifier = ">=2.35" },
-    { name = "llm-gemini", specifier = ">=0.32" },
+    { name = "llm-gemini", specifier = ">=0.35" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "sn2md", specifier = ">=2.7.0" },
@@ -2027,20 +2017,8 @@ wheels = [
 ]
 
 [[package]]
-name = "sqlite-migrate"
-version = "0.1b0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "sqlite-utils" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/13/86/1463a00d3c4bdb707c0ed4077d17687465a0aa9444593f66f6c4b49e39b5/sqlite-migrate-0.1b0.tar.gz", hash = "sha256:8d502b3ca4b9c45e56012bd35c03d23235f0823c976d4ce940cbb40e33087ded", size = 10736, upload-time = "2023-10-27T23:47:43.855Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/df/92/994545b912e6d6feb40323047f02ca039321e690aa2c27afcd5c4105e37b/sqlite_migrate-0.1b0-py3-none-any.whl", hash = "sha256:a4125e35e1de3dc56b6b6ec60e9833ce0ce20192b929ddcb2d4246c5098859c6", size = 9986, upload-time = "2023-10-27T23:47:42.476Z" },
-]
-
-[[package]]
 name = "sqlite-utils"
-version = "3.39"
+version = "4.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
@@ -2051,9 +2029,9 @@ dependencies = [
     { name = "sqlite-fts4" },
     { name = "tabulate" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/b3/e3/6b1106349e2576c18409b27bd3b16f193b1cf38220d98ad22aa454c5e075/sqlite_utils-3.39.tar.gz", hash = "sha256:bfa2eac29b3e3eb5c9647283797527febcf4efd4a9bbb31d979a14a11ef9dbcd", size = 215324, upload-time = "2025-11-24T18:45:49.91Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7e/6b/4a7b3d20c92e6c7acedc96ef620df8e1ea8f94a26a41ab788c1c08055815/sqlite_utils-4.2.1.tar.gz", hash = "sha256:76114b6a5414714e6c70e5fa5c4781b301b590f6951b5da39c8cc60c21382ba1", size = 311722, upload-time = "2026-08-13T23:59:17.848Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/51/33/7e01d2f6b8c778529dfae9045c4f46b33ba145c3d401fa95b07f599e7403/sqlite_utils-3.39-py3-none-any.whl", hash = "sha256:349c099c0cd60d4ee9139a24d5c9cb64af3906c3e90832fcbbd74da49333374d", size = 68451, upload-time = "2025-11-24T18:45:48.366Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/d0/a20b9ea8686ea14f171582f3ce9f9b40b8fbb858fea744896191c09f2c2f/sqlite_utils-4.2.1-py3-none-any.whl", hash = "sha256:7fbaee670713b25eceba05779b844f0895efaf680d9a226fa5ba7dfe165721c5", size = 99482, upload-time = "2026-08-13T23:59:16.796Z" },
 ]
 
 [[package]]

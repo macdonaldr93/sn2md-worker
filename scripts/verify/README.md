@@ -67,7 +67,7 @@ technical brief §7 (poll `files.list` with `modifiedTime` filter).
 
 ---
 
-## 02 — sn2md → Gemini 2.5 Pro end-to-end
+## 02 — sn2md → Gemini end-to-end
 
 Confirms that sn2md's Python API produces Markdown from a real `.note`
 file using `llm-gemini`.
@@ -84,8 +84,8 @@ file using `llm-gemini`.
 export LLM_GEMINI_KEY=your-key
 # Model string. Confirmed 2026-07-04 that llm-gemini requires the
 # prefixed "gemini/..." form. The script defaults to
-# "gemini/gemini-2.5-pro"; override only if trying a different model.
-# export SN2MD_MODEL=gemini/gemini-2.5-pro
+# "gemini/gemini-3.8-flash"; override only if trying a different model.
+# export SN2MD_MODEL=gemini/gemini-3.8-flash
 ```
 
 ### Run

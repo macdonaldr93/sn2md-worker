@@ -111,7 +111,7 @@ Runs continuously as a Docker container on my Unraid server.
 
 ### LLM / sn2md
 
-- **Model**: `gemini/gemini-2.5-pro` (via `llm-gemini` plugin ≥0.32).
+- **Model**: `gemini/gemini-3.8-flash` (via `llm-gemini` plugin ≥0.35).
 - **Prompt**: sn2md's default Markdown template augmented with stricter
   ASCII-only Mermaid and CommonMark escaping guidance (overridable via
   `sn2md.prompt` in config).
