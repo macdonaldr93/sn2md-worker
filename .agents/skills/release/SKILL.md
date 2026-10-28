@@ -80,3 +80,15 @@ Once the version-bump PR is merged into `main`:
    EOF
    )"
    ```
+
+## 4. Post-Release Validation
+
+Before signing off on the release:
+
+1. Watch or inspect the triggered `Publish container images` (`release.yml`) run on tag `vX.Y.Z`:
+   ```sh
+   gh run list --workflow release.yml --branch vX.Y.Z --limit 1
+   gh api repos/macdonaldr93/sn2md-worker/commits/vX.Y.Z/check-runs \
+     --jq '.check_runs[] | {name, status, conclusion, annotations_count: .output.annotations_count}'
+   ```
+2. Confirm both `Publish sn2md-worker` and `Publish obsidian-sync` succeeded with `annotations_count: 0`, and check the `Prune old and untagged GHCR versions` step log (`gh run view <run-id> --log | grep -E "total=.*kept_releases="`) to verify `kept_releases=5` and clean pruning.
