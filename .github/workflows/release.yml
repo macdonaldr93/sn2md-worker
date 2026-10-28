@@ -2,8 +2,8 @@ name: Publish container images
 
 on:
   push:
-    branches: [main]
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -49,12 +49,10 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
+            type=raw,value=latest
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=sha,prefix=sha-,format=short
 
       - name: Build and push multi-arch image
         uses: docker/build-push-action@v6
@@ -68,3 +66,104 @@ jobs:
           cache-to: type=gha,mode=max,scope=${{ matrix.image }}
           provenance: true
           sbom: true
+
+      - name: Prune old and untagged GHCR versions (keep latest 5 releases)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          PACKAGE_NAME: sn2md-worker${{ matrix.image_suffix }}
+          FULL_IMAGE: ghcr.io/${{ github.repository }}${{ matrix.image_suffix }}
+          KEEP_RELEASES: "5"
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import urllib.parse
+
+          owner = os.environ["OWNER"]
+          pkg = os.environ["PACKAGE_NAME"]
+          encoded_pkg = urllib.parse.quote(pkg, safe="")
+          full_image = os.environ["FULL_IMAGE"].lower()
+          keep_n = int(os.environ["KEEP_RELEASES"])
+
+          res = subprocess.run(
+              [
+                  "gh",
+                  "api",
+                  "--paginate",
+                  "--slurp",
+                  f"/users/{owner}/packages/container/{encoded_pkg}/versions?per_page=100",
+              ],
+              capture_output=True,
+              text=True,
+          )
+          if res.returncode != 0:
+              print(f"::warning::Could not list GHCR versions for {pkg}: {res.stderr.strip()}")
+              sys.exit(0)
+
+          pages = json.loads(res.stdout)
+          versions = [v for page in pages for v in page]
+          semver_re = re.compile(r"^v?\d+\.\d+\.\d+$")
+
+          # Sort newest first
+          versions.sort(key=lambda v: v.get("created_at", ""), reverse=True)
+
+          kept_top_versions = []
+          for v in versions:
+              tags = v.get("metadata", {}).get("container", {}).get("tags", [])
+              is_release = any(semver_re.match(t) for t in tags) or "latest" in tags
+              if is_release and len(kept_top_versions) < keep_n:
+                  kept_top_versions.append(v)
+
+          protected_digests = {v["name"] for v in kept_top_versions}
+
+          # Protect multi-arch platform & attestation child manifests referenced by kept indexes
+          for v in kept_top_versions:
+              digest = v["name"]
+              inspect = subprocess.run(
+                  ["docker", "buildx", "imagetools", "inspect", "--raw", f"{full_image}@{digest}"],
+                  capture_output=True,
+                  text=True,
+              )
+              if inspect.returncode != 0:
+                  print(
+                      f"::warning::Could not inspect {full_image}@{digest}; skipping untagged cleanup"
+                  )
+                  sys.exit(0)
+              manifest = json.loads(inspect.stdout)
+              for child in manifest.get("manifests", []):
+                  if "digest" in child:
+                      protected_digests.add(child["digest"])
+
+          to_delete = [v for v in versions if v["name"] not in protected_digests]
+          print(
+              f"{pkg}: total={len(versions)}, kept_releases={len(kept_top_versions)}, "
+              f"protected_manifests={len(protected_digests)}, deleting={len(to_delete)}"
+          )
+
+          for v in to_delete:
+              vid = v["id"]
+              tags = v.get("metadata", {}).get("container", {}).get("tags", [])
+              del_res = subprocess.run(
+                  [
+                      "gh",
+                      "api",
+                      "--method",
+                      "DELETE",
+                      f"/users/{owner}/packages/container/{encoded_pkg}/versions/{vid}",
+                  ],
+                  capture_output=True,
+                  text=True,
+              )
+              if del_res.returncode == 0:
+                  print(f"  deleted version {vid} ({v['name'][:19]} tags={tags})")
+              else:
+                  print(
+                      f"::warning::Could not delete version {vid} ({tags}): {del_res.stderr.strip()} "
+                      "(ensure repository has Admin access in Package Settings -> Manage Actions access)"
+                  )
+                  break
+          PY
