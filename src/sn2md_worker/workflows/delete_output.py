@@ -6,6 +6,7 @@ from pathlib import Path
 import structlog
 from dbos import DBOS, SetEnqueueOptions
 from dbos._error import DBOSQueueDeduplicatedError
+from pydantic import BaseModel, ConfigDict
 
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.conversion.paths import resolve_vault_subdir
@@ -26,6 +27,14 @@ from sn2md_worker.workflows.queues import CONVERT_QUEUE_NAME
 __all__ = ["delete_output", "delete_output_impl"]
 
 _log = get_logger("sn2md_worker.workflows.delete_output")
+
+
+class _RepointTarget(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    new_file_id: str
+    source_path: str
+    logical_key: str
 
 
 @DBOS.workflow()
@@ -67,29 +76,30 @@ def delete_output_impl(
                 settings=settings,
             )
             if repointed is not None:
-                new_file_id, source_path, logical_key = repointed
                 # Guards against a delete-side push without a
                 # matching create-side push.
                 try:
-                    with SetEnqueueOptions(deduplication_id=f"{new_file_id}:{source_path}"):
+                    with SetEnqueueOptions(
+                        deduplication_id=f"{repointed.new_file_id}:{repointed.source_path}"
+                    ):
                         DBOS.enqueue_workflow(
                             CONVERT_QUEUE_NAME,
                             convert_note,
-                            new_file_id,
-                            source_path,
+                            repointed.new_file_id,
+                            repointed.source_path,
                             correlation_id,
                         )
                 except DBOSQueueDeduplicatedError:
                     _log.info(
                         "delete_output_repoint_convert_deduplicated",
-                        new_file_id=new_file_id,
-                        logical_key=logical_key,
+                        new_file_id=repointed.new_file_id,
+                        logical_key=repointed.logical_key,
                     )
                 _log.info(
                     "delete_output_skipped",
                     reason="repointed_to_new_file",
-                    new_file_id=new_file_id,
-                    logical_key=logical_key,
+                    new_file_id=repointed.new_file_id,
+                    logical_key=repointed.logical_key,
                 )
         except Exception as exc:
             _log.error("delete_output_failed", error=str(exc), exc_info=True)
@@ -102,12 +112,12 @@ def _repoint_or_delete_step(
     file_id: str,
     source: NoteSource,
     settings: Settings,
-) -> tuple[str, str, str] | None:
+) -> _RepointTarget | None:
     """Perform the DB/Drive/filesystem delete or repoint inside a DBOS step.
 
-    Returns `(new_file_id, source_path, logical_key)` when a live twin was
-    found and repointed (so the enclosing workflow can enqueue `convert_note`),
-    or `None` when the output was deleted or skipped.
+    Returns `_RepointTarget` when a live twin was found and repointed (so the
+    enclosing workflow can enqueue `convert_note`), or `None` when the output
+    was deleted or skipped.
     """
     # First read is outside the lock only to resolve logical_key;
     # the decisive re-read happens inside the lock.
@@ -145,7 +155,11 @@ def _repoint_or_delete_step(
                 return None
             if live is not None and live.id != file_id:
                 _repoint(logical_key=record.logical_key, new_file_id=live.id)
-                return (live.id, record.source_path, record.logical_key)
+                return _RepointTarget(
+                    new_file_id=live.id,
+                    source_path=record.source_path,
+                    logical_key=record.logical_key,
+                )
 
         if not _delete_from_vault(record.output_rel_path, settings.vault.root_path):
             _log.warning(

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
 import structlog
 from dbos import DBOS, SetEnqueueOptions
 from dbos._error import DBOSQueueDeduplicatedError
+from pydantic import BaseModel, ConfigDict
 
 from sn2md_worker.config import Settings, get_settings
 from sn2md_worker.correlation import new_correlation_id
@@ -43,23 +43,25 @@ POLL_TRIGGER_FALLBACK = "fallback"
 _log = get_logger("sn2md_worker.workflows.poll_changes")
 
 
-@dataclass(frozen=True, slots=True)
-class _ChangeAction:
+class _ChangeAction(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     target: Literal["convert_note", "delete_output"]
     file_id: str
     source_path: str | None = None
     reason: str | None = None
 
 
-@dataclass(frozen=True, slots=True)
-class _PagePlan:
-    cursor_expired: bool
-    new_cursor: str | None
-    actions: tuple[_ChangeAction, ...]
-    ignored: int
-    errored: int
-    next_page_token: str | None
-    new_start_page_token: str | None
+class _PagePlan(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    cursor_expired: bool = False
+    new_cursor: str | None = None
+    actions: tuple[_ChangeAction, ...] = ()
+    ignored: int = 0
+    errored: int = 0
+    next_page_token: str | None = None
+    new_start_page_token: str | None = None
 
 
 @DBOS.workflow()

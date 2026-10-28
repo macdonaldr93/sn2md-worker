@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 
 import structlog
 from dbos import DBOS
+from pydantic import BaseModel, ConfigDict
 
 from sn2md_worker.clock import now_utc
 from sn2md_worker.config import Settings, get_settings
@@ -36,6 +37,12 @@ RENEWAL_HEADROOM = timedelta(hours=48)
 _WATCH_CHANNEL_LOCK_KEY = "__watch_channel__"
 
 _log = get_logger("sn2md_worker.workflows.renew_watch")
+
+
+class _RenewChannelOutcome(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    replaced_existing: bool
 
 
 @DBOS.workflow()
@@ -76,13 +83,13 @@ def renew_watch_channel_impl(
                 _log.warning("renew_watch_skipped", reason="no_webhook_url")
                 return
 
-            replaced_existing = _renew_channel_step(
+            outcome = _renew_channel_step(
                 drive=drive,
                 settings=settings,
                 now=now,
                 trigger_source=trigger_source,
             )
-            if replaced_existing:
+            if outcome.replaced_existing:
                 # Replaced an existing channel: enqueue a catch-up poll to
                 # cover the seam between the old channel's last delivered
                 # push and the new one going active. First-ever creation
@@ -105,13 +112,8 @@ def _renew_channel_step(
     settings: Settings,
     now: datetime,
     trigger_source: str,
-) -> bool:
-    """Check, stop, and replace the active watch channel under the channel lock.
-
-    Returns True when an existing channel was replaced (so the caller
-    should enqueue a catch-up renewal poll), or False when the existing
-    channel is still fresh or a first-ever channel was created.
-    """
+) -> _RenewChannelOutcome:
+    """Check, stop, and replace the active watch channel under the channel lock."""
     with lock_for(_WATCH_CHANNEL_LOCK_KEY):
         with sql_session() as session:
             active = watch_channels.get_active(session)
@@ -126,7 +128,7 @@ def _renew_channel_step(
                     channel_id=active.channel_id,
                     expires_at=active.expires_at.isoformat(),
                 )
-                return False
+                return _RenewChannelOutcome(replaced_existing=False)
             if not url_matches:
                 _log.info(
                     "renew_watch_url_changed",
@@ -137,7 +139,7 @@ def _renew_channel_step(
             _try_stop_channel(drive=drive, active=active)
 
         _create_and_activate(drive=drive, settings=settings, now=now, trigger=trigger_source)
-        return active is not None
+        return _RenewChannelOutcome(replaced_existing=active is not None)
 
 
 def ensure_active_channel(drive: DriveClient | None, settings: Settings) -> None:
