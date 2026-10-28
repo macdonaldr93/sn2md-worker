@@ -1,6 +1,6 @@
 [project]
 name = "sn2md-worker"
-version = "0.3.0"
+version = "0.4.0"
 description = "Convert Supernote .note files from Google Drive to Obsidian Markdown"
 readme = "README.md"
 requires-python = ">=3.12"
