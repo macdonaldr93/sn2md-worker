@@ -52,6 +52,9 @@ src = ["src", "tests"]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "A", "RET", "TID", "PL"]
 ignore = ["PLR0913"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["sn2md_worker", "scripts"]
+
 [tool.ruff.lint.per-file-ignores]
 # Verification scripts are throwaway; keep them readable rather than golf them.
 "scripts/verify/*.py" = ["PLR0912", "PLR0915", "PLR2004", "PLC0415"]
@@ -62,8 +65,8 @@ ignore = ["PLR0913"]
 python_version = "3.12"
 strict = true
 plugins = ["pydantic.mypy"]
-mypy_path = "src"
-packages = ["sn2md_worker"]
+mypy_path = ["src", "."]
+packages = ["sn2md_worker", "scripts.ci"]
 
 [[tool.mypy.overrides]]
 module = [
@@ -78,6 +81,7 @@ module = [
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 addopts = "-ra"
